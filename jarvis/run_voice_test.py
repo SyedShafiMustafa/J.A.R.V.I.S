@@ -30,6 +30,7 @@ from backend.bus import (
 )
 from backend.models import Session
 from backend.lifecycle import Lifecycle, make_audio_cleanup
+from backend.retry import retry, RetryConfig
 
 from audio.wake_word import WakeWordDetector
 from audio.vad import VoiceRecorder
@@ -140,27 +141,38 @@ class LiveToolRunner:
     def __init__(self, session_id: str | None = None):
         self._executor = TaskExecutor()
         self._session_id = session_id
+        self._retry_config = RetryConfig(
+            max_attempts=3,
+            base_delay_s=0.5,
+            backoff=2.0,
+            max_delay_s=5.0,
+            jitter=True,
+        )
 
     def run(self, call: ToolCall, task: Task | None = None) -> ToolResult:
         task_id = None if task is None else task.id
-        bus.publish(tool_started(session_id=self._session_id, task_id=task_id, tool=call.tool))
 
-        try:
-            plan = {"goal": call.tool, "steps": [dict(call.payload)]}
-            success = self._executor.execute(plan)
-            result = ToolResult(
-                tool=call.tool,
-                success=success,
-                message="ok" if success else "tool reported failure",
-            )
-            bus.publish(tool_finished(session_id=self._session_id, task_id=task_id, tool=call.tool, success=success))
-            return result
-        except TransientError:
-            bus.publish(tool_failed(session_id=self._session_id, task_id=task_id, tool=call.tool, error="transient"))
-            raise
-        except Exception as e:
-            bus.publish(tool_failed(session_id=self._session_id, task_id=task_id, tool=call.tool, error=str(e)))
-            raise TransientError(f"Tool execution failed: {e}") from e
+        def _execute() -> ToolResult:
+            bus.publish(tool_started(session_id=self._session_id, task_id=task_id, tool=call.tool))
+
+            try:
+                plan = {"goal": call.tool, "steps": [dict(call.payload)]}
+                success = self._executor.execute(plan)
+                result = ToolResult(
+                    tool=call.tool,
+                    success=success,
+                    message="ok" if success else "tool reported failure",
+                )
+                bus.publish(tool_finished(session_id=self._session_id, task_id=task_id, tool=call.tool, success=success))
+                return result
+            except TransientError:
+                bus.publish(tool_failed(session_id=self._session_id, task_id=task_id, tool=call.tool, error="transient"))
+                raise
+            except Exception as e:
+                bus.publish(tool_failed(session_id=self._session_id, task_id=task_id, tool=call.tool, error=str(e)))
+                raise TransientError(f"Tool execution failed: {e}") from e
+
+        return retry(_execute, config=self._retry_config)
 
 
 # --------------------------------------------------
