@@ -41,6 +41,10 @@ from backend.interfaces import (
     FakeToolRunner,
     ToolCall,
     ToolResult,
+    ToolRunner,
+    AudioProvider,
+    Orchestrator,
+    OrchestratorDecision,
 )
 from backend.models import Session, Task, TaskStatus
 from backend.retry import retry, RetryConfig
@@ -58,9 +62,9 @@ from backend.bus import (
     audio_stop,
     ReplayObserver,
 )
-from backend.tools import ToolError, ToolResult as ToolsToolResult, ToolRegistry, build_default_tool_registry
+from backend.tools import ToolError, ToolResult as BackendToolResult, ToolRegistry, build_default_tool_registry
 from backend.validation import validate_model_paths, validate_required_settings, validate_backend_startup
-from backend.logging import log_event
+from backend.logging import log_event, log_info, log_error
 
 
 _passed = 0
@@ -185,6 +189,78 @@ def test_error_taxonomy() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Fake audio provider with controlled transcript/error behavior
+# ---------------------------------------------------------------------------
+
+class ConfigurableFakeAudio:
+    """Fake AudioProvider that can be configured for tests."""
+
+    def __init__(
+        self,
+        transcript: str = "",
+        record_path: str = "fake_recording.wav",
+        speak_calls: list[str] | None = None,
+    ) -> None:
+        self.transcript = transcript
+        self.record_path = record_path
+        self.speak_calls = speak_calls if speak_calls is not None else []
+        self.wake_started = False
+        self.wake_stopped = False
+
+    def start_wake_word(self) -> None:
+        self.wake_started = True
+
+    def stop_wake_word(self) -> None:
+        self.wake_stopped = True
+
+    def record_audio(self) -> str:
+        return self.record_path
+
+    def transcribe(self, audio_path: str) -> str:
+        return self.transcript
+
+    def speak(self, text: str) -> None:
+        self.speak_calls.append(text)
+
+    def stop_speaking(self) -> None:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Fake tool runner with controlled success/failure behavior
+# ---------------------------------------------------------------------------
+
+class ControlledFakeRunner:
+    """Fake ToolRunner that can be scripted to succeed or fail."""
+
+    def __init__(self, results: list[ToolResult] | None = None) -> None:
+        self.results = results if results is not None else []
+        self.calls: list[ToolCall] = []
+
+    def run(self, call: ToolCall, task=None) -> ToolResult:
+        self.calls.append(call)
+
+        if not self.results:
+            return ToolResult(tool=call.tool, success=True, message="ok", data=dict(call.payload))
+
+        return self.results.pop(0)
+
+
+# ---------------------------------------------------------------------------
+# Fake orchestrator for decision routing tests
+# ---------------------------------------------------------------------------
+
+class FakeOrchestrator:
+    """Orchestrator that always returns a scripted decision."""
+
+    def __init__(self, decision: OrchestratorDecision) -> None:
+        self.decision = decision
+
+    def decide(self, user_text: str, context=None) -> OrchestratorDecision:
+        return self.decision
+
+
+# ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
 
@@ -192,7 +268,7 @@ def test_fakes() -> None:
     start_section("fakes")
 
     audio = FakeAudioProvider()
-    ok("fake audio implements contract", True)  # imported fine
+    ok("fake audio implements contract", isinstance(audio, AudioProvider))
     assert_equal(audio.record_audio(), "", "fake record returns empty path")
     assert_equal(audio.transcribe("dummy.wav"), "", "fake transcribe returns empty")
     audio.start_wake_word()
@@ -209,6 +285,23 @@ def test_fakes() -> None:
     ok("fake runner message", result.message == "fake:open_app")
     assert_equal(result.data, {"app": "notepad"}, "fake runner payload")
     ok("fake runner recorded call", runner.calls == [call])
+
+    cfg = ConfigurableFakeAudio(transcript="hello world", speak_calls=[])
+    assert_equal(cfg.transcribe("anything.wav"), "hello world", "configurable fake transcript")
+    cfg.speak("one")
+    cfg.speak("two")
+    ok("configurable fake records speak calls", cfg.speak_calls == ["one", "two"])
+
+    runner2 = ControlledFakeRunner()
+    r = runner2.run(ToolCall("type", {"text": "x"}))
+    ok("controlled fake runner defaults to success", r.success is True)
+
+    runner3 = ControlledFakeRunner(results=[
+        ToolResult(tool="type", success=False, message="boom", data={}),
+    ])
+    r2 = runner3.run(ToolCall("type", {"text": "x"}))
+    ok("controlled fake runner can be scripted to fail", r2.success is False)
+    ok("controlled fake runner carries failure message", r2.message == "boom")
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +382,16 @@ def test_retry() -> None:
     )
     ok("permanent failure raised immediately", True)
 
+    # Retry should not swallow non-retryable exceptions
+    def non_retryable_excepthook() -> str:
+        raise ValueError("not retryable")
+
+    assert_raises(
+        ValueError,
+        lambda: retry(non_retryable_excepthook, config=RetryConfig(max_attempts=3, base_delay_s=0.0, max_delay_s=0.01, jitter=False)),
+        "retry propagates non-retryable exceptions immediately",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Event bus
@@ -325,7 +428,27 @@ def test_event_bus() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Validation
+# Logging boundaries
+# ---------------------------------------------------------------------------
+
+def test_logging() -> None:
+    start_section("logging")
+
+    ok("log_event is callable", callable(log_event))
+    ok("log_info is callable", callable(log_info))
+    ok("log_error is callable", callable(log_error))
+
+    # Simple structural check: basic log calls should not crash.
+    try:
+        log_info("test.at", "info message", {"key": "value"})
+        log_error("test.at", "error message", {"key": "value"})
+        ok("log_info/error run without raising", True)
+    except Exception as e:
+        ok("log_info/error run without raising", False, str(e))
+
+
+# ---------------------------------------------------------------------------
+# Main
 # ---------------------------------------------------------------------------
 
 def test_validation() -> None:
@@ -337,19 +460,13 @@ def test_validation() -> None:
         "ConfigurationError exists",
     )
 
-    # These validation functions are meant to run against the real config
-    # and files. Here we only check that they exist and are callable.
     ok("validate_required_settings exists", callable(validate_required_settings))
     ok("validate_model_paths exists", callable(validate_model_paths))
     ok("validate_backend_startup exists", callable(validate_backend_startup))
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main() -> None:
-    print("Running backend smoke tests")
+    print("Running backend test suite")
     print("Python:", sys.version.split()[0])
 
     test_session_task_lifecycle()
@@ -358,7 +475,42 @@ def main() -> None:
     test_tool_definitions()
     test_retry()
     test_event_bus()
+    test_logging()
     test_validation()
+
+    # Light backend integration checks using fakes
+    start_section("backend integration with fakes")
+
+    session2 = Session("integ-sess")
+    ok("session starts clean for integration", session2.active_task is None)
+
+    bus2 = BackendBus()
+    replay2 = ReplayObserver()
+    bus2.subscribe(replay2)
+
+    bus2.publish(session_started(session2))
+    ok("integration session started event emitted", len(replay2.events) == 1)
+    ok(
+        replay2.events[0].kind == "session.started",
+        "integration session event kind",
+    )
+
+    runner3 = ControlledFakeRunner()
+    call3 = ToolCall("type", {"text": "integration test"})
+    result3 = runner3.run(call3)
+    ok("integration tool call recorded", len(runner3.calls) == 1)
+    ok("integration tool call result is success", result3.success is True)
+
+    orchestrator = FakeOrchestrator(
+        OrchestratorDecision(
+            kind="reply",
+            reply="integration reply",
+            metadata={"source": "fake"},
+        )
+    )
+    decision = orchestrator.decide("hello")
+    ok("fake orchestrator returns scripted decision", decision.kind == "reply")
+    ok("fake orchestrator reply preserved", decision.reply == "integration reply")
 
     print()
     print("--------")
@@ -370,7 +522,7 @@ def main() -> None:
             print(" -", label)
         sys.exit(1)
 
-    print("backend smoke tests passed")
+    print("backend test suite passed")
 
 
 if __name__ == "__main__":
