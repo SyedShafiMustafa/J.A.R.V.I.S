@@ -10,6 +10,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from backend.validation import validate_backend_startup
 from backend.logging import log_info, log_error
+from backend.bus import (
+    BackendBus,
+    wake_detected,
+    wake_listening,
+    audio_start,
+    audio_stop,
+    transcription_ready,
+    tool_started,
+    tool_finished,
+    tool_failed,
+    user_interrupt,
+    session_started,
+    session_ended,
+    task_started,
+    task_completed,
+    task_failed,
+    LoggingObserver,
+)
+from backend.models import Session
 
 from audio.wake_word import WakeWordDetector
 from audio.vad import VoiceRecorder
@@ -50,11 +69,12 @@ class LiveAudioProvider:
     or faked for tests.
     """
 
-    def __init__(self):
+    def __init__(self, session_id: str | None = None):
         self.recorder = VoiceRecorder()
         self.stt = SpeechToText()
         self.tts = TextToSpeech()
         self._wake_detector: WakeWordDetector | None = None
+        self._session_id = session_id
 
     def start_wake_word(self) -> None:
         if self._wake_detector is not None:
@@ -63,17 +83,27 @@ class LiveAudioProvider:
         self._wake_detector = WakeWordDetector(on_detect=self._on_wake_detected)
         self._wake_detector.start()
 
+        bus.publish(wake_listening(session_id=self._session_id))
+
     def stop_wake_word(self) -> None:
         if self._wake_detector is None:
             return
 
         self._wake_detector = None
 
+        bus.publish(wake_listening(session_id=self._session_id, meta={"stopped": True}))
+
     def record_audio(self) -> str:
-        return self.recorder.record()
+        bus.publish(audio_start(session_id=self._session_id))
+        try:
+            path = self.recorder.record()
+            return path
+        finally:
+            bus.publish(audio_stop(session_id=self._session_id))
 
     def transcribe(self, audio_path: str) -> str:
-        return self.stt.transcribe(audio_path)
+        text = self.stt.transcribe(audio_path)
+        return text
 
     def speak(self, text: str) -> None:
         self.tts.speak(text)
@@ -106,21 +136,29 @@ class LiveToolRunner:
     place for retries, timeouts, and structured logging later.
     """
 
-    def __init__(self):
+    def __init__(self, session_id: str | None = None):
         self._executor = TaskExecutor()
+        self._session_id = session_id
 
     def run(self, call: ToolCall, task: Task | None = None) -> ToolResult:
+        task_id = None if task is None else task.id
+        bus.publish(tool_started(session_id=self._session_id, task_id=task_id, tool=call.tool))
+
         try:
             plan = {"goal": call.tool, "steps": [dict(call.payload)]}
             success = self._executor.execute(plan)
-            return ToolResult(
+            result = ToolResult(
                 tool=call.tool,
                 success=success,
                 message="ok" if success else "tool reported failure",
             )
+            bus.publish(tool_finished(session_id=self._session_id, task_id=task_id, tool=call.tool, success=success))
+            return result
         except TransientError:
+            bus.publish(tool_failed(session_id=self._session_id, task_id=task_id, tool=call.tool, error="transient"))
             raise
         except Exception as e:
+            bus.publish(tool_failed(session_id=self._session_id, task_id=task_id, tool=call.tool, error=str(e)))
             raise TransientError(f"Tool execution failed: {e}") from e
 
 
@@ -219,6 +257,12 @@ except Exception as e:
     log_error("backend.startup", "startup validation failed", {"error": str(e)})
     print(f"❌ Backend startup check failed: {e}")
     os._exit(1)
+
+bus = BackendBus()
+bus.subscribe(LoggingObserver(verbose=True))
+
+session = Session("voice-session")
+bus.publish(session_started(session))
 
 print("🧠 Loading Whisper...")
 
@@ -343,8 +387,8 @@ def conversation():
 
         print("\n🎤 Listening...")
 
-        audio = recorder.record()
-        user = stt.transcribe(audio).strip()
+        audio_path = recorder.record()
+        user = stt.transcribe(audio_path).strip()
 
         if not user:
             continue
