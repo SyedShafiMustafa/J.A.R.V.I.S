@@ -157,12 +157,20 @@ class FakeAudioProvider:
 
 
 class FakeToolRunner:
-    """Tool runner that records calls and returns success by default."""
+    """Tool runner that records calls and returns success by default.
+
+    Its ``run()`` signature matches the real tool runner contract so
+    fake-based tests stay aligned with the live adapter.
+    """
 
     def __init__(self):
         self.calls: list[ToolCall] = []
 
-    def run(self, call: ToolCall) -> ToolResult:
+    def run(
+        self,
+        call: ToolCall,
+        task: Task | None = None,
+    ) -> ToolResult:
         self.calls.append(call)
         return ToolResult(
             tool=call.tool,

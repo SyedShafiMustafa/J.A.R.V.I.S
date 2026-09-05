@@ -231,13 +231,21 @@ class ConfigurableFakeAudio:
 # ---------------------------------------------------------------------------
 
 class ControlledFakeRunner:
-    """Fake ToolRunner that can be scripted to succeed or fail."""
+    """Fake ToolRunner that can be scripted to succeed or fail.
+
+    Its ``run()`` signature matches the real tool runner contract so
+    tests can swap it in without changing call sites.
+    """
 
     def __init__(self, results: list[ToolResult] | None = None) -> None:
         self.results = results if results is not None else []
         self.calls: list[ToolCall] = []
 
-    def run(self, call: ToolCall, task=None) -> ToolResult:
+    def run(
+        self,
+        call: ToolCall,
+        task: Task | None = None,
+    ) -> ToolResult:
         self.calls.append(call)
 
         if not self.results:
