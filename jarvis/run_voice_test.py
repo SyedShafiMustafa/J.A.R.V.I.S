@@ -21,6 +21,175 @@ from tools.executor import TaskExecutor
 from core.memory import Memory
 from core.router import CommandRouter
 
+from backend.interfaces import (
+    AudioProvider,
+    ToolCall,
+    ToolResult,
+    ToolRunner,
+    Orchestrator,
+    OrchestratorDecision,
+    TransientError,
+    PermanentError,
+)
+
+
+# --------------------------------------------------
+# ADAPTER: existing audio stack -> AudioProvider
+# --------------------------------------------------
+
+class LiveAudioProvider:
+    """
+    Adapter that presents the current audio modules as a single
+    AudioProvider contract.
+
+    This is where audio wiring lives, so the rest of the backend
+    doesn't care whether wake word, STT, and TTS are local, remote,
+    or faked for tests.
+    """
+
+    def __init__(self):
+        self.recorder = VoiceRecorder()
+        self.stt = SpeechToText()
+        self.tts = TextToSpeech()
+        self._wake_detector: WakeWordDetector | None = None
+
+    def start_wake_word(self) -> None:
+        if self._wake_detector is not None:
+            raise RuntimeError("Wake word detector already running")
+
+        self._wake_detector = WakeWordDetector(on_detect=self._on_wake_detected)
+        self._wake_detector.start()
+
+    def stop_wake_word(self) -> None:
+        if self._wake_detector is None:
+            return
+
+        self._wake_detector = None
+
+    def record_audio(self) -> str:
+        return self.recorder.record()
+
+    def transcribe(self, audio_path: str) -> str:
+        return self.stt.transcribe(audio_path)
+
+    def speak(self, text: str) -> None:
+        self.tts.speak(text)
+
+    def stop_speaking(self) -> None:
+        self.tts.stop()
+
+    # --------------------------------------------------
+    # Wake word wiring kept close to audio, not spread
+    # across the orchestration layer
+    # --------------------------------------------------
+
+    def _on_wake_detected(self) -> None:
+        raise NotImplementedError(
+            "LiveAudioProvider does not run the conversation directly. "
+            "Wake detection should hand off to the orchestrator layer."
+        )
+
+
+# --------------------------------------------------
+# ADAPTER: existing tools -> ToolRunner
+# --------------------------------------------------
+
+class LiveToolRunner:
+    """
+    Adapter that executes ToolCall objects using the existing
+    desktop/computer/vision tool stack.
+
+    This gives tools a stable input/output contract and a single
+    place for retries, timeouts, and structured logging later.
+    """
+
+    def __init__(self):
+        self._executor = TaskExecutor()
+
+    def run(self, call: ToolCall) -> ToolResult:
+        try:
+            plan = {"goal": call.tool, "steps": [dict(call.payload)]}
+            success = self._executor.execute(plan)
+            return ToolResult(
+                tool=call.tool,
+                success=success,
+                message="ok" if success else "tool reported failure",
+            )
+        except Exception as e:
+            raise TransientError(f"Tool execution failed: {e}") from e
+
+
+# --------------------------------------------------
+# ADAPTER: existing router/brain/planner -> Orchestrator
+# --------------------------------------------------
+
+class LiveOrchestrator:
+    """
+    Orchestrator that decides what to do with a user utterance.
+
+    It preserves the existing behavior:
+    - simple commands go through the command router
+    - action requests go through planner + executor
+    - everything else goes to the brain
+    """
+
+    def __init__(self):
+        self.router = CommandRouter()
+        self.planner = TaskPlanner()
+        self.brain = JarvisBrain()
+        self.memory = Memory()
+
+    def decide(self, user_text: str, context: dict[str, Any] | None = None) -> OrchestratorDecision:
+        context = context or {}
+        user_lower = user_text.lower()
+
+        handled, reply = self.router.route(user_text)
+        if handled:
+            return OrchestratorDecision(
+                kind="reply",
+                reply=reply,
+                metadata={"handled_by": "router"},
+            )
+
+        if _is_action_request(user_lower):
+            return OrchestratorDecision(
+                kind="action",
+                intent=user_text,
+                metadata={"handled_by": "planner"},
+            )
+
+        memories = self.memory.search_memories(user_text)
+        if memories:
+            context["memories"] = memories
+
+        return OrchestratorDecision(
+            kind="chat",
+            intent=user_text,
+            metadata={"handled_by": "brain", "context": context},
+        )
+
+
+def _is_action_request(text: str) -> bool:
+    action_words = [
+        "open",
+        "launch",
+        "start",
+        "close",
+        "search",
+        "find",
+        "play",
+        "click",
+        "type",
+        "write",
+        "message",
+        "send",
+        "scroll",
+        "press",
+        "youtube",
+        "google",
+    ]
+    return any(word in text for word in action_words)
+
 
 # --------------------------------------------------
 # INITIALIZE
@@ -29,9 +198,9 @@ from core.router import CommandRouter
 print("🚀 Starting JARVIS...")
 print("🧠 Loading Whisper...")
 
-recorder = VoiceRecorder()
-stt = SpeechToText()
-tts = TextToSpeech()
+audio = LiveAudioProvider()
+tool_runner = LiveToolRunner()
+orchestrator = LiveOrchestrator()
 
 brain = JarvisBrain()
 planner = TaskPlanner()
