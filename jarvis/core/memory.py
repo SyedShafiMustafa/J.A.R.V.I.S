@@ -1,14 +1,12 @@
 import threading
 import sqlite3
-from pathlib import Path
+
+from config.settings import MEMORY_DB_PATH
 
 
 class Memory:
     def __init__(self):
-        data_dir = Path("data")
-        data_dir.mkdir(exist_ok=True)
-
-        self.db_path = data_dir / "memory.db"
+        self.db_path = MEMORY_DB_PATH
 
         self.conn = sqlite3.connect(
             self.db_path,

@@ -4,12 +4,14 @@ import numpy as np
 import threading
 import queue
 
+from config.config import PIPER_MODEL
+
 
 class TextToSpeech:
     def __init__(self):
         print("🔊 Loading Piper voice...")
 
-        self.voice = PiperVoice.load("models/piper/jarvis.onnx")
+        self.voice = PiperVoice.load(str(PIPER_MODEL))
         self.sample_rate = 22050
 
         self.queue = queue.Queue()

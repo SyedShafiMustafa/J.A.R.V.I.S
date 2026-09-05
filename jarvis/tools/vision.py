@@ -151,3 +151,20 @@ class ScreenVision:
 
     def type_text(self, text):
         pyautogui.write(text, interval=0.02)
+
+    # ---------------------------------------
+    # Whole-screen summary (window title + OCR text)
+    # ---------------------------------------
+
+    def read_screen(self):
+
+        win = gw.getActiveWindow()
+        window = win.title if win else None
+
+        elements = self.read_elements()
+        text = " ".join(e["text"] for e in elements)
+
+        return {
+            "window": window,
+            "text": text
+        }

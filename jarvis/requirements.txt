@@ -1,29 +1,31 @@
 # --- AI brain (local, free) ---
-ollama                  # Python client to talk to your locally running Ollama model
+requests                  # Ollama API calls (streaming chat) — the "ollama" pip package is NOT used
 
 # --- Voice: wake word + speech-to-text + text-to-speech ---
-pvporcupine              # wake word detection ("Hey Jarvis"), runs offline
-pyaudio                  # microphone input stream
+openwakeword              # wake word detection ("Hey Jarvis"), runs offline
 faster-whisper            # local speech-to-text, fast + accurate
-edge-tts                 # free, decent-quality TTS (works offline-ish, no API key)
-sounddevice              # audio playback/recording helper
-numpy                    # audio array math
+piper-tts                 # local JARVIS voice synthesis (models/piper)
+pyaudio                   # microphone input stream
+sounddevice               # audio playback/recording helper
+soundfile                 # WAV writing for voice recordings
+numpy                     # audio array math
 
 # --- Memory ---
-chromadb                 # local vector database for semantic memory search
+chromadb                  # local vector database — semantic memory (roadmap)
 
 # --- Desktop control ---
-pyautogui                # move mouse, click, type, screenshot
+pyautogui                 # move mouse, click, type, screenshot
 pygetwindow               # find/focus/list open windows
-psutil                   # list/manage running processes
+pyperclip                 # clipboard read/write
+pywinauto                 # Windows UI automation (active window controls)
+pywin32                   # win32gui used by ui_automation
 
 # --- Vision ---
-opencv-python              # webcam capture
-Pillow                   # image handling for screenshots
+pytesseract               # OCR on screenshots (also requires the Tesseract binary: https://github.com/UB-Mannheim/tesseract/wiki)
+Pillow                    # image handling for screenshots
 
-# --- UI ---
-PySide6                  # the futuristic desktop interface
+# --- UI (roadmap — orb window not built yet) ---
+PySide6                   # the futuristic desktop interface
 
 # --- Utilities ---
-python-dotenv              # load settings from .env file
-requests                 # for web search / HTTP calls
+python-dotenv             # load settings from .env file

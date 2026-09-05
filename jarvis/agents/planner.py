@@ -180,8 +180,11 @@ class TaskPlanner:
             }
         }
 
-        response = requests.post(self.url, json=payload)
-        response.raise_for_status()
+        try:
+            response = requests.post(self.url, json=payload)
+            response.raise_for_status()
+        except requests.RequestException as e:
+            raise RuntimeError(f"Ollama not reachable ({e}) — is it running?")
 
         content = response.json()["message"]["content"].strip()
 

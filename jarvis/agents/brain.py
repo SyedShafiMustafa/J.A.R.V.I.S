@@ -26,18 +26,22 @@ class JarvisBrain:
             ],
             "options": {
                 "temperature": 0.3,
-                "num_predict": 40,
+                "num_predict": 150,
                 "num_ctx": 1024
             }
         }
 
-        response = requests.post(
-            self.url.replace("/generate", "/chat"),
-            json=payload,
-            stream=True
-        )
-
-        response.raise_for_status()
+        try:
+            response = requests.post(
+                self.url.replace("/generate", "/chat"),
+                json=payload,
+                stream=True
+            )
+            response.raise_for_status()
+        except requests.RequestException as e:
+            print(f"❌ Ollama error: {e}")
+            yield "I'm having trouble reaching my brain. Please check that Ollama is running."
+            return
 
         buffer = ""
 
@@ -46,7 +50,10 @@ class JarvisBrain:
             if not line:
                 continue
 
-            data = json.loads(line.decode())
+            try:
+                data = json.loads(line.decode())
+            except json.JSONDecodeError:
+                continue
 
             token = data.get("message", {}).get("content", "")
 

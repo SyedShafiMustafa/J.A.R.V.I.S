@@ -108,7 +108,37 @@ class DesktopController:
     # -------------------------------------------------
 
     def close_app(self, app):
+        app = app.lower().strip()
+
+        # 1. Direct guess: <app>.exe
         os.system(f'taskkill /IM "{app}.exe" /F >nul 2>&1')
+
+        # 2. Fallback: scan real process names and kill any that match
+        #    a word of the app name (handles "visual studio code" -> Code.exe)
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            for line in result.stdout.splitlines():
+                parts = line.strip().strip('"').split('","')
+
+                if len(parts) < 2:
+                    continue
+
+                proc = parts[0].strip().lower()
+                stem = proc.replace(".exe", "")
+
+                for word in app.split():
+                    if len(word) > 2 and word in stem:
+                        os.system(f'taskkill /IM "{proc}" /F >nul 2>&1')
+                        return
+
+        except Exception:
+            pass
 
     # -------------------------------------------------
     # Browser tools

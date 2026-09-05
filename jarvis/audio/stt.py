@@ -1,13 +1,15 @@
 from faster_whisper import WhisperModel
 
+from config.config import WHISPER_MODEL
+
 
 class SpeechToText:
 
     def __init__(self):
-        print("🧠 Loading Faster-Whisper Large-v3 Turbo...")
+        print(f"🧠 Loading Faster-Whisper {WHISPER_MODEL}...")
 
         self.model = WhisperModel(
-            "large-v3-turbo",
+            WHISPER_MODEL,
             device="cpu",
             compute_type="int8"
         )

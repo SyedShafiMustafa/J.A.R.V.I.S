@@ -1,7 +1,12 @@
 import os
 import re
+import sys
 import time
 import random
+from pathlib import Path
+
+# Make imports work no matter which directory this script is run from
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audio.wake_word import WakeWordDetector
 from audio.vad import VoiceRecorder
@@ -199,25 +204,36 @@ def conversation():
 
         if is_action_request(user):
 
+            # ---------- Plan ----------
+
             try:
-
                 plan = planner.create_plan(user)
-
-                print("🤖 Jarvis: Working on it.")
-                tts.speak("Working on it.")
+            except Exception as e:
+                print(f"❌ Planning failed: {e}")
+                tts.speak("I couldn't plan that task. Please check that Ollama is running.")
                 tts.wait()
-
-                executor.execute(plan)
-
-                print("🤖 Jarvis: Done.")
-                tts.speak("Done.")
-                tts.wait()
-
                 timeout = time.time() + 30
                 continue
 
-            except Exception as e:
-                print(e)
+            # ---------- Execute ----------
+
+            print("🤖 Jarvis: Working on it.")
+            tts.speak("Working on it.")
+            tts.wait()
+
+            success = executor.execute(plan)
+
+            if success:
+                print("🤖 Jarvis: Done.")
+                tts.speak("Done.")
+            else:
+                print("🤖 Jarvis: I couldn't complete that task.")
+                tts.speak("I couldn't complete that task.")
+
+            tts.wait()
+
+            timeout = time.time() + 30
+            continue
 
         # ==================================================
         # KNOWLEDGE → Brain

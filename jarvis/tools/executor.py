@@ -27,8 +27,11 @@ class TaskExecutor:
                 time.sleep(2)
 
             elif tool == "wait_window":
-                self.computer.wait_for_window(step["title"])
-                self.computer.focus_window(step["title"])
+                found = self.computer.wait_for_window(step["title"])
+                if found:
+                    self.computer.focus_window(step["title"])
+                else:
+                    print(f"⚠ Window '{step['title']}' not found within timeout")
                 time.sleep(0.8)
 
             elif tool == "close_app":
@@ -62,14 +65,15 @@ class TaskExecutor:
                 self.computer.hotkey(*step["keys"])
                 time.sleep(0.5)
 
-            # ---------------- NEW : Semantic Vision ----------------
+            # ---------------- Semantic Vision ----------------
 
             elif tool == "click_text":
 
                 success = self.vision.click_text(step["text"])
 
                 if not success:
-                    raise Exception(f"Could not find '{step['text']}' on screen")
+                    print(f"⚠ Could not find '{step['text']}' on screen — aborting task.")
+                    return False
 
                 time.sleep(0.5)
 

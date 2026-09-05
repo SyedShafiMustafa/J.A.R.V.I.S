@@ -27,6 +27,9 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")      # "ollama" or "openai"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
+# --- Speech-to-text ---
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")   # tiny / base / medium / large-v3-turbo
+
 # --- Wake word ---
 PICOVOICE_ACCESS_KEY = os.getenv("PICOVOICE_ACCESS_KEY", "")
 WAKE_WORD = "jarvis"          # Porcupine's free built-in keyword we'll start with
