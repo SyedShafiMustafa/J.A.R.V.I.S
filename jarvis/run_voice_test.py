@@ -31,6 +31,14 @@ from backend.bus import (
 from backend.models import Session
 from backend.lifecycle import Lifecycle, make_audio_cleanup
 from backend.retry import retry, RetryConfig
+from backend.tools import (
+    ToolDefinition,
+    ToolError,
+    ToolExecutor,
+    ToolResult,
+    ToolRegistry,
+    build_default_tool_registry,
+)
 
 from audio.wake_word import WakeWordDetector
 from audio.vad import VoiceRecorder
@@ -148,6 +156,10 @@ class LiveToolRunner:
             max_delay_s=5.0,
             jitter=True,
         )
+        self._registry = build_default_tool_registry()
+
+    def tool_definition(self, tool: str) -> ToolDefinition | None:
+        return self._registry.get(tool)
 
     def run(self, call: ToolCall, task: Task | None = None) -> ToolResult:
         task_id = None if task is None else task.id
@@ -173,6 +185,42 @@ class LiveToolRunner:
                 raise TransientError(f"Tool execution failed: {e}") from e
 
         return retry(_execute, config=self._retry_config)
+
+    def dry_run(self, call: ToolCall) -> ToolResult:
+        """Validate a tool call and describe what would happen without running it."""
+        definition = self._registry.get(call.tool)
+
+        if definition is None:
+            return ToolError(
+                tool=call.tool,
+                reason=f"Unknown tool: {call.tool}",
+            ).to_result()
+
+        if not definition.supports_dry_run:
+            return ToolError(
+                tool=call.tool,
+                reason=f"Dry run is not supported for tool: {call.tool}",
+            ).to_result()
+
+        missing: list[str] = []
+
+        for field in definition.input_fields:
+            if field.get("required") and field["name"] not in call.payload:
+                missing.append(field["name"])
+
+        if missing:
+            return ToolError(
+                tool=call.tool,
+                reason=f"Missing required fields: {', '.join(missing)}",
+                detail={"missing": missing},
+            ).to_result()
+
+        return ToolResult(
+            tool=call.tool,
+            success=True,
+            message=f"Would execute {call.tool}",
+            data={"definition": definition.describe(), "payload": dict(call.payload)},
+        )
 
 
 # --------------------------------------------------
