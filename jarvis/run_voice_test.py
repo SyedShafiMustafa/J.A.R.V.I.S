@@ -41,8 +41,6 @@ from backend.tools import (
 )
 
 from audio.wake_word import WakeWordDetector
-from audio.vad import VoiceRecorder
-from audio.stt import SpeechToText
 from audio.tts import TextToSpeech
 
 from agents.brain import JarvisBrain
@@ -334,13 +332,6 @@ audio = LiveAudioProvider(session_id=session.id)
 tool_runner = LiveToolRunner(session_id=session.id)
 orchestrator = LiveOrchestrator()
 
-lifecycle.register_cleanup(make_audio_cleanup(
-    bus=bus,
-    session_id=session.id,
-    stop_wake_word=audio.stop_wake_word,
-    stop_speaking=audio.stop_speaking,
-))
-
 brain = JarvisBrain()
 planner = TaskPlanner()
 executor = TaskExecutor()
@@ -444,16 +435,140 @@ def is_action_request(text):
 # CONVERSATION
 # --------------------------------------------------
 
+def handle_turn(user_text: str) -> bool:
+    """Process one user turn through the backend contracts.
+
+    Returns True if the conversation loop should keep running.
+    """
+    session.note_user(user_text)
+    decision = orchestrator.decide(user_text)
+    session.note_decision(decision.metadata or {})
+
+    if decision.kind == "reply":
+        reply = decision.reply or ""
+        print(f"\n🤖 Jarvis: {reply}")
+        audio.speak(reply)
+        audio.wait()
+        session.note_reply(reply)
+        return True
+
+    if decision.kind == "action":
+        return handle_action(user_text)
+
+    return handle_chat(user_text)
+
+
+def handle_action(user_text: str) -> bool:
+    """Plan and execute one action request through the tool contract."""
+    print("\n🤖 Jarvis: Working on it.")
+    audio.speak("Working on it.")
+    audio.wait()
+
+    try:
+        task = orchestrator.plan_action(user_text)
+    except Exception as e:
+        print(f"❌ Planning failed: {e}")
+        audio.speak("I couldn't plan that task. Please check that Ollama is running.")
+        audio.wait()
+        return True
+
+    session.active_task = task
+    bus.publish(task_started(task, session_id=session.id))
+
+    task.start()
+
+    try:
+        for step in task.steps:
+            if lifecycle.shutdown_requested:
+                session.cancel_active_task()
+                return False
+
+            call = ToolCall(tool=step["tool"], payload={k: v for k, v in step.items() if k != "tool"})
+            result = tool_runner.run(call, task=task)
+
+            if not result.success:
+                task.fail(result.message or "tool failed")
+                bus.publish(task_failed(task, session_id=session.id))
+                print(f"\n🤖 Jarvis: I couldn't complete that task.")
+                audio.speak("I couldn't complete that task.")
+                audio.wait()
+                return True
+
+        task.complete("done")
+        bus.publish(task_completed(task, session_id=session.id))
+
+        print("\n🤖 Jarvis: Done.")
+        audio.speak("Done.")
+        audio.wait()
+
+        return True
+
+    except TransientError as e:
+        task.fail(str(e))
+        bus.publish(task_failed(task, session_id=session.id))
+        print(f"\n🤖 Jarvis: I couldn't complete that task.")
+        audio.speak("I couldn't complete that task.")
+        audio.wait()
+        return True
+    except Exception as e:
+        task.fail(f"unexpected error: {e}")
+        bus.publish(task_failed(task, session_id=session.id))
+        print(f"\n🤖 Jarvis: Something went wrong.")
+        audio.speak("Something went wrong.")
+        audio.wait()
+        return True
+    finally:
+        session.active_task = None
+
+
+def handle_chat(user_text: str) -> bool:
+    """Reply to a general knowledge request through the brain."""
+    memories = memory.search_memories(user_text)
+
+    if memories:
+        context = f"Relevant memories:\n{memories}\n\nUser: {user_text}"
+    else:
+        context = user_text
+
+    print("🤖 Jarvis:", end=" ", flush=True)
+
+    full_reply = ""
+    first = True
+    start = time.time()
+
+    for sentence in brain.stream(context):
+
+        if first:
+            print(f"\n⚡ First response: {time.time()-start:.2f}s")
+            print("🤖 Jarvis:", end=" ", flush=True)
+            first = False
+
+        print(sentence, end=" ", flush=True)
+        audio.speak(sentence)
+        full_reply += sentence + " "
+
+    audio.wait()
+    print()
+
+    memory.save_memory(user_text, full_reply.strip())
+    session.note_reply(full_reply.strip())
+
+    return True
+
+
 def conversation():
+    """Main wake-driven conversation loop using the backend contracts."""
 
     wake = random.choice(WAKE_RESPONSES)
 
     print(f"\n🤖 Jarvis: {wake}")
-    tts.speak(wake)
-    tts.wait()
+    audio.speak(wake)
+    audio.wait()
 
     if lifecycle.shutdown_requested:
         return
+
+    bus.publish(wake_detected(session_id=session.id))
 
     timeout = time.time() + 30
 
@@ -461,24 +576,23 @@ def conversation():
 
         print("\n🎤 Listening...")
 
-        audio_path = recorder.record()
-        user = stt.transcribe(audio_path).strip()
+        audio_path = audio.record_audio()
+        user = audio.transcribe(audio_path).strip()
 
         if not user:
             continue
 
         print(f"🧑 You: {user}")
+        bus.publish(transcription_ready(session_id=session.id, user_text=user))
 
         # ---------------- Shutdown ----------------
 
         if is_shutdown_command(user):
-
             reply = "Shutting down. Goodbye, Shafi."
 
-            print(f"🤖 Jarvis: {reply}")
-
-            tts.speak(reply)
-            tts.wait()
+            print(f"\n🤖 Jarvis: {reply}")
+            audio.speak(reply)
+            audio.wait()
 
             lifecycle.request_shutdown()
             lifecycle.shutdown()
@@ -487,104 +601,23 @@ def conversation():
         # ---------------- Sleep ----------------
 
         if is_sleep_command(user):
-
             reply = "Going back to sleep."
 
-            print(f"🤖 Jarvis: {reply}")
-
-            tts.speak(reply)
-            tts.wait()
+            print(f"\n🤖 Jarvis: {reply}")
+            audio.speak(reply)
+            audio.wait()
 
             lifecycle.request_shutdown()
             return
 
-        # ---------------- Router ----------------
+        # ---------------- User interrupt ----------------
 
-        handled, reply = router.route(user)
+        if lifecycle.shutdown_requested:
+            bus.publish(user_interrupt(session_id=session.id))
+            return False
 
-        if handled:
-
-            print(f"🤖 Jarvis: {reply}")
-
-            tts.speak(reply)
-            tts.wait()
-
-            timeout = time.time() + 30
-            continue
-
-        # ==================================================
-        # ACTIONS → Planner + Executor
-        # ==================================================
-
-        if is_action_request(user):
-
-            # ---------- Plan ----------
-
-            try:
-                plan = planner.create_plan(user)
-            except Exception as e:
-                print(f"❌ Planning failed: {e}")
-                tts.speak("I couldn't plan that task. Please check that Ollama is running.")
-                tts.wait()
-                timeout = time.time() + 30
-                continue
-
-            # ---------- Execute ----------
-
-            print("🤖 Jarvis: Working on it.")
-            tts.speak("Working on it.")
-            tts.wait()
-
-            success = executor.execute(plan)
-
-            if success:
-                print("🤖 Jarvis: Done.")
-                tts.speak("Done.")
-            else:
-                print("🤖 Jarvis: I couldn't complete that task.")
-                tts.speak("I couldn't complete that task.")
-
-            tts.wait()
-
-            timeout = time.time() + 30
-            continue
-
-        # ==================================================
-        # KNOWLEDGE → Brain
-        # ==================================================
-
-        memories = memory.search_memories(user)
-
-        context = user
-
-        if memories:
-            context = f"Relevant memories:\n{memories}\n\nUser: {user}"
-
-        print("🤖 Jarvis:", end=" ", flush=True)
-
-        full_reply = ""
-        first = True
-        start = time.time()
-
-        for sentence in brain.stream(context):
-
-            if first:
-
-                print(f"\n⚡ First response: {time.time()-start:.2f}s")
-                print("🤖 Jarvis:", end=" ", flush=True)
-
-                first = False
-
-            print(sentence, end=" ", flush=True)
-
-            tts.speak(sentence)
-
-            full_reply += sentence + " "
-
-        tts.wait()
-        print()
-
-        memory.save_memory(user, full_reply.strip())
+        if not handle_turn(user):
+            return False
 
         timeout = time.time() + 30
 
