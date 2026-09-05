@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol, runtime_checkable
 
+from backend.models import Session, Task, TaskStatus
+
 
 # ============================================================================
 # Shared error taxonomy
@@ -116,6 +118,8 @@ class OrchestratorDecision:
     reply: str | None = None
     tool_calls: list[ToolCall] | None = None
     metadata: dict[str, Any] | None = None
+    session: Session | None = None
+    task: Task | None = None
 
 
 @runtime_checkable

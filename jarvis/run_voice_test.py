@@ -106,7 +106,7 @@ class LiveToolRunner:
     def __init__(self):
         self._executor = TaskExecutor()
 
-    def run(self, call: ToolCall) -> ToolResult:
+    def run(self, call: ToolCall, task: Task | None = None) -> ToolResult:
         try:
             plan = {"goal": call.tool, "steps": [dict(call.payload)]}
             success = self._executor.execute(plan)
@@ -115,6 +115,8 @@ class LiveToolRunner:
                 success=success,
                 message="ok" if success else "tool reported failure",
             )
+        except TransientError:
+            raise
         except Exception as e:
             raise TransientError(f"Tool execution failed: {e}") from e
 
@@ -167,6 +169,16 @@ class LiveOrchestrator:
             intent=user_text,
             metadata={"handled_by": "brain", "context": context},
         )
+
+    def plan_action(self, user_text: str) -> Task:
+        """Plan an action request into a tracked Task."""
+        plan = self.planner.create_plan(user_text)
+        task = Task(
+            id=plan.get("goal", "action").replace(" ", "_")[:64],
+            goal=plan.get("goal", user_text),
+            steps=plan.get("steps", []),
+        )
+        return task
 
 
 def _is_action_request(text: str) -> bool:
