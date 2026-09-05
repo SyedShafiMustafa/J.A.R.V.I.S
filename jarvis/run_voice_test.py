@@ -22,19 +22,16 @@ from backend.bus import (
     tool_failed,
     user_interrupt,
     session_started,
-    session_ended,
     task_started,
     task_completed,
     task_failed,
     LoggingObserver,
 )
-from backend.models import Session
 from backend.lifecycle import Lifecycle, make_audio_cleanup
 from backend.retry import retry, RetryConfig
 from backend.tools import (
     ToolDefinition,
     ToolError,
-    ToolExecutor,
     ToolResult,
     ToolRegistry,
     build_default_tool_registry,
@@ -46,8 +43,6 @@ from audio.tts import TextToSpeech
 from agents.brain import JarvisBrain
 from agents.planner import TaskPlanner
 
-from tools.executor import TaskExecutor
-
 from core.memory import Memory
 from core.router import CommandRouter
 
@@ -58,8 +53,6 @@ from backend.interfaces import (
     ToolRunner,
     Orchestrator,
     OrchestratorDecision,
-    TransientError,
-    PermanentError,
 )
 
 
@@ -78,6 +71,9 @@ class LiveAudioProvider:
     """
 
     def __init__(self, session_id: str | None = None):
+        from audio.vad import VoiceRecorder
+        from audio.stt import SpeechToText
+
         self.recorder = VoiceRecorder()
         self.stt = SpeechToText()
         self.tts = TextToSpeech()
@@ -334,7 +330,6 @@ orchestrator = LiveOrchestrator()
 
 brain = JarvisBrain()
 planner = TaskPlanner()
-executor = TaskExecutor()
 
 memory = Memory()
 router = CommandRouter()
