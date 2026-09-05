@@ -8,6 +8,9 @@ from pathlib import Path
 # Make imports work no matter which directory this script is run from
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from backend.validation import validate_backend_startup
+from backend.logging import log_info, log_error
+
 from audio.wake_word import WakeWordDetector
 from audio.vad import VoiceRecorder
 from audio.stt import SpeechToText
@@ -208,6 +211,15 @@ def _is_action_request(text: str) -> bool:
 # --------------------------------------------------
 
 print("🚀 Starting JARVIS...")
+
+try:
+    validate_backend_startup()
+    log_info("backend.startup", "startup validation passed")
+except Exception as e:
+    log_error("backend.startup", "startup validation failed", {"error": str(e)})
+    print(f"❌ Backend startup check failed: {e}")
+    os._exit(1)
+
 print("🧠 Loading Whisper...")
 
 audio = LiveAudioProvider()
