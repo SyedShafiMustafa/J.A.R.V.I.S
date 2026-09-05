@@ -29,6 +29,7 @@ from backend.bus import (
     LoggingObserver,
 )
 from backend.models import Session
+from backend.lifecycle import Lifecycle, make_audio_cleanup
 
 from audio.wake_word import WakeWordDetector
 from audio.vad import VoiceRecorder
@@ -264,11 +265,21 @@ bus.subscribe(LoggingObserver(verbose=True))
 session = Session("voice-session")
 bus.publish(session_started(session))
 
+lifecycle = Lifecycle(bus, session)
+lifecycle.mark_started()
+
 print("🧠 Loading Whisper...")
 
-audio = LiveAudioProvider()
-tool_runner = LiveToolRunner()
+audio = LiveAudioProvider(session_id=session.id)
+tool_runner = LiveToolRunner(session_id=session.id)
 orchestrator = LiveOrchestrator()
+
+lifecycle.register_cleanup(make_audio_cleanup(
+    bus=bus,
+    session_id=session.id,
+    stop_wake_word=audio.stop_wake_word,
+    stop_speaking=audio.stop_speaking,
+))
 
 brain = JarvisBrain()
 planner = TaskPlanner()
@@ -381,6 +392,9 @@ def conversation():
     tts.speak(wake)
     tts.wait()
 
+    if lifecycle.shutdown_requested:
+        return
+
     timeout = time.time() + 30
 
     while time.time() < timeout:
@@ -406,6 +420,8 @@ def conversation():
             tts.speak(reply)
             tts.wait()
 
+            lifecycle.request_shutdown()
+            lifecycle.shutdown()
             os._exit(0)
 
         # ---------------- Sleep ----------------
@@ -419,6 +435,7 @@ def conversation():
             tts.speak(reply)
             tts.wait()
 
+            lifecycle.request_shutdown()
             return
 
         # ---------------- Router ----------------
