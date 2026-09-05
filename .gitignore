@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Environment / secrets
+.env
+
+# Agent metadata
+.freebuff/
+
+# JARVIS generated artifacts
+jarvis/temp.wav
+jarvis/logs/*.png
+jarvis/data/*.db
+jarvis/data/vector_store/
+
+# OS
+Thumbs.db
+.DS_Store

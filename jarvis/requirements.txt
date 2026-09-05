@@ -1,0 +1,29 @@
+# --- AI brain (local, free) ---
+ollama                  # Python client to talk to your locally running Ollama model
+
+# --- Voice: wake word + speech-to-text + text-to-speech ---
+pvporcupine              # wake word detection ("Hey Jarvis"), runs offline
+pyaudio                  # microphone input stream
+faster-whisper            # local speech-to-text, fast + accurate
+edge-tts                 # free, decent-quality TTS (works offline-ish, no API key)
+sounddevice              # audio playback/recording helper
+numpy                    # audio array math
+
+# --- Memory ---
+chromadb                 # local vector database for semantic memory search
+
+# --- Desktop control ---
+pyautogui                # move mouse, click, type, screenshot
+pygetwindow               # find/focus/list open windows
+psutil                   # list/manage running processes
+
+# --- Vision ---
+opencv-python              # webcam capture
+Pillow                   # image handling for screenshots
+
+# --- UI ---
+PySide6                  # the futuristic desktop interface
+
+# --- Utilities ---
+python-dotenv              # load settings from .env file
+requests                 # for web search / HTTP calls
