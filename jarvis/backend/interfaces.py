@@ -95,13 +95,14 @@ class ToolResult:
     success: bool
     message: str
     data: dict[str, Any] | None = None
+    meta: dict[str, Any] | None = None
 
 
 @runtime_checkable
 class ToolRunner(Protocol):
     """Executes a tool call and returns a structured result."""
 
-    def run(self, call: ToolCall) -> ToolResult:
+    def run(self, call: ToolCall, task: Task | None = None) -> ToolResult:
         ...
 
 

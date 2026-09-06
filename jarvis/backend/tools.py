@@ -102,7 +102,7 @@ class ToolResult:
 # ---------------------------------------------------------------------------
 
 class ToolRegistry:
-    """Runtime lookup for tool definitions."""
+    """Single source of truth for tool metadata and dry-run validation."""
 
     def __init__(self) -> None:
         self._tools: dict[str, ToolDefinition] = {}
@@ -115,6 +115,55 @@ class ToolRegistry:
 
     def list_all(self) -> list[dict[str, Any]]:
         return [tool.describe() for tool in self._tools.values()]
+
+    def validate_payload(self, name: str, payload: dict[str, Any]) -> ToolError | None:
+        """Return a ToolError if the payload is invalid for this tool, else None."""
+        definition = self._tools.get(name)
+        if definition is None:
+            return ToolError(
+                tool=name,
+                reason=f"Unknown tool: {name}",
+            )
+
+        if not definition.supports_dry_run:
+            return ToolError(
+                tool=name,
+                reason=f"Dry run is not supported for tool: {name}",
+            )
+
+        missing: list[str] = []
+        for field in definition.input_fields:
+            if field.get("required") and field["name"] not in payload:
+                missing.append(field["name"])
+
+        if missing:
+            return ToolError(
+                tool=name,
+                reason=f"Missing required fields: {', '.join(missing)}",
+                detail={"missing": missing},
+            )
+
+        return None
+
+    def describe_execution(
+        self,
+        name: str,
+        payload: dict[str, Any],
+        dry_run: bool = False,
+    ) -> ToolResult:
+        """Describe what executing this tool call would look like."""
+        error = self.validate_payload(name, payload)
+        if error is not None:
+            return error.to_result()
+
+        definition = self._tools[name]
+        message = "Would execute {tool}".format(tool=name) if dry_run else "Ready to execute {tool}".format(tool=name)
+        return ToolResult(
+            tool=name,
+            success=True,
+            message=message,
+            data={"definition": definition.describe(), "payload": dict(payload)},
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -60,6 +60,9 @@ from backend.bus import (
     wake_listening,
     audio_start,
     audio_stop,
+    task_started,
+    task_completed,
+    task_failed,
     ReplayObserver,
 )
 from backend.tools import ToolError, ToolResult as BackendToolResult, ToolRegistry, build_default_tool_registry
@@ -249,7 +252,13 @@ class ControlledFakeRunner:
         self.calls.append(call)
 
         if not self.results:
-            return ToolResult(tool=call.tool, success=True, message="ok", data=dict(call.payload))
+            return ToolResult(
+                tool=call.tool,
+                success=True,
+                message="ok",
+                data=dict(call.payload),
+                meta={"controlled": True},
+            )
 
         return self.results.pop(0)
 
@@ -400,6 +409,32 @@ def test_retry() -> None:
         "retry propagates non-retryable exceptions immediately",
     )
 
+    # Retry attaches lightweight metadata to tool results
+    calls3 = []
+
+    def flaky_tool() -> ToolResult:
+        calls3.append(1)
+        if len(calls3) < 2:
+            raise TransientError("temporary")
+        return ToolResult(tool="type", success=True, message="done", data={}, meta={"origin": "fake"})
+
+    rt = retry(flaky_tool, config=RetryConfig(max_attempts=3, base_delay_s=0.0, max_delay_s=0.01, jitter=False))
+    ok("retry preserves tool result shape", isinstance(rt, ToolResult))
+    ok("retry reports eventual success", rt.success is True)
+    ok("retry keeps existing meta fields", rt.meta is not None and rt.meta.get("origin") == "fake")
+    ok("retry attaches attempt metadata", rt.meta is not None and rt.meta.get("attempt") == 2)
+    ok("retry attaches retries_used metadata", rt.meta is not None and rt.meta.get("retries_used") == 1)
+
+
+    def failing_tool() -> ToolResult:
+        raise TransientError("nope")
+
+    assert_raises(
+        TransientError,
+        lambda: retry(failing_tool, config=RetryConfig(max_attempts=2, base_delay_s=0.0, max_delay_s=0.01, jitter=False)),
+        "retry raises when all attempts fail",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Event bus
@@ -435,6 +470,38 @@ def test_event_bus() -> None:
     ok("unsubscribed listener not called", len(replay.events) == 4)
 
 
+def test_tool_registry_single_source() -> None:
+    start_section("tool registry as single source of truth")
+
+    reg = build_default_tool_registry()
+
+    ok("registry knows type tool", reg.get("type") is not None)
+    ok("registry knows open_app tool", reg.get("open_app") is not None)
+    ok("registry rejects unknown tool", reg.get("nope") is None)
+
+    error = reg.validate_payload("type", {"text": "hello"})
+    ok("valid payload passes registry validation", error is None)
+
+    bad = reg.validate_payload("type", {})
+    ok("missing required field fails registry validation", bad is not None)
+    ok("missing field error names the tool", bad is not None and bad.tool == "type")
+    ok("missing field error includes field names", "text" in (bad.detail or {}).get("missing", []))
+
+    no_dry = reg.validate_payload("open_app", {"app": "something"})
+    ok("dry-run unsupported tool fails validation", no_dry is not None)
+    ok("dry-run unsupported error names the tool", no_dry is not None and no_dry.tool == "open_app")
+
+    desc = reg.describe_execution("type", {"text": "hello"})
+    ok("describe_execution success for valid tool", desc.success is True)
+    ok("describe_execution names the tool", desc.tool == "type")
+
+    bad_desc = reg.describe_execution("type", {})
+    ok("describe_execution fails for invalid payload", bad_desc.success is False)
+
+    unknown_desc = reg.describe_execution("nope", {})
+    ok("describe_execution fails for unknown tool", unknown_desc.success is False)
+
+
 # ---------------------------------------------------------------------------
 # Logging boundaries
 # ---------------------------------------------------------------------------
@@ -455,9 +522,238 @@ def test_logging() -> None:
         ok("log_info/error run without raising", False, str(e))
 
 
+def test_lifecycle_interrupt_behavior() -> None:
+    start_section("lifecycle / interrupt behavior")
+
+    from backend.lifecycle import Lifecycle
+
+    bus = BackendBus()
+    replay = ReplayObserver()
+    bus.subscribe(replay)
+
+    session = Session("lc-sess")
+    lifecycle = Lifecycle(bus, session)
+    lifecycle.mark_started()
+
+    ok("lifecycle starts running", lifecycle.running is True)
+    ok("lifecycle starts with no shutdown requested", lifecycle.shutdown_requested is False)
+
+    lifecycle.request_shutdown()
+    ok("request_shutdown sets flag", lifecycle.shutdown_requested is True)
+    ok("request_shutdown cancels active task", session.cancelled is True)
+
+    bus2 = BackendBus()
+    session2 = Session("lc-sess-2")
+    lifecycle2 = Lifecycle(bus2, session2)
+    lifecycle2.mark_started()
+
+    task = Task("lc-task", "interrupt me", [])
+    session2.active_task = task
+    task.start()
+
+    lifecycle2.request_shutdown()
+    ok("shutdown request cancels running active task", session2.active_task is not None and session2.active_task.status == TaskStatus.CANCELLED)
+
+    finished_events = [e for e in replay.events if e.kind in {"session.ended", "audio.stop", "tool.failed"}]
+    ok("no session ended event before shutdown()", len(finished_events) == 0)
+
+    # lifecycle2 in this smoke test is not wired to 'bus', so it does not
+    # publish session.ended to the replay observer above. The contract we care
+    # about is that Lifecycle.shutdown() publishes session.ended through its own
+    # bus. That is verified separately with lifecycle5 / replay5 below.
+    # Note: lifecycle2 is not wired to 'bus' in this smoke check, so it does
+    # not publish session.ended to the replay observer above. That is intentional:
+    # it verifies that Lifecycle.shutdown() emits through its own bus, not through
+    # some global. The real contract test for that is lifecycle5 / replay5.
+    lifecycle2.shutdown()
+    ended_events = [e for e in replay.events if e.kind == "session.ended"]
+    ok("shutdown does not publish to unrelated bus", len(ended_events) == 0)
+    if len(ended_events) > 0:
+        recent_kinds = [e.kind for e in replay.events[-6:]]
+        print(f"  note: unexpected session.ended kinds near lifecycle2: {recent_kinds}")
+        ok("debug note: lifecycle2 unexpectedly published to replay bus", False, "expected no session.ended from lifecycle2")
+
+
+
+
+
+    ok("lifecycle stops running after shutdown", lifecycle2.running is False)
+
+    # Cleanup callback ordering / robustness
+    cleanup_called = []
+    lifecycle3 = Lifecycle(bus, Session("lc-sess-3"))
+    lifecycle3.mark_started()
+    lifecycle3.register_cleanup(lambda: cleanup_called.append("a"))
+    lifecycle3.register_cleanup(lambda: cleanup_called.append("b"))
+    lifecycle3.shutdown()
+    ok("cleanup callbacks run on shutdown", cleanup_called == ["a", "b"])
+
+    error_called = []
+    lifecycle4 = Lifecycle(bus, Session("lc-sess-4"))
+    lifecycle4.mark_started()
+    def bad_cleanup():
+        error_called.append("bad")
+        raise RuntimeError("cleanup fail")
+    lifecycle4.register_cleanup(bad_cleanup)
+    lifecycle4.shutdown()
+    ok("shutdown continues even if a cleanup callback fails", error_called == ["bad"])
+
+    # Session ended event requires shutdown to be published after the bus is wired.
+    # This smoke check verifies the contract when the Lifecycle is created with
+    # the same bus it should publish on.
+    bus5 = BackendBus()
+    replay5 = ReplayObserver()
+    bus5.subscribe(replay5)
+    lifecycle5 = Lifecycle(bus5, Session("lc-sess-5"))
+    lifecycle5.mark_started()
+    lifecycle5.shutdown()
+    ended_events5 = [e for e in replay5.events if e.kind == "session.ended"]
+    ok("session ended event is published through the lifecycle bus", len(ended_events5) >= 1)
+    if len(ended_events5) >= 1:
+        ok("session ended names the session", ended_events5[0].session_id == "lc-sess-5")
+    else:
+        ok("session ended event is published through the lifecycle bus", False, "no session.ended event found")
+        recent5 = [e.kind for e in replay5.events[-6:]]
+        print(f"  note: recent bus event kinds near lifecycle5: {recent5}")
+        print(f"  note: lifecycle5._bus is replay5 bus: {lifecycle5._bus is bus5}")
+        print(f"  note: lifecycle5._bus._listeners contains replay5: {replay5 in list(lifecycle5._bus._listeners)}")
+
+
+
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+def test_validation() -> None:
+    start_section("validation")
+
+    assert_raises(
+        ConfigurationError,
+        lambda: (_ for _ in ()).throw(ConfigurationError("bad")),
+        "ConfigurationError exists",
+    )
+
+    ok("validate_required_settings exists", callable(validate_required_settings))
+    ok("validate_model_paths exists", callable(validate_model_paths))
+    ok("validate_backend_startup exists", callable(validate_backend_startup))
+
+
+def test_tool_execution_meta() -> None:
+    start_section("tool execution metadata")
+
+    base = ToolResult(
+        tool="type",
+        success=True,
+        message="typed",
+        data={"chars": 5},
+        meta={"origin": "fake"},
+    )
+    ok("tool result carries metadata", base.meta is not None and base.meta.get("origin") == "fake")
+
+    updated = ToolResult(
+        tool=base.tool,
+        success=base.success,
+        message=base.message,
+        data=base.data,
+        meta={"attempt": 2, "retries_used": 1, "origin": "fake"},
+    )
+    ok("retry metadata can be attached to tool result", updated.meta is not None and updated.meta.get("attempt") == 2)
+    ok("retry metadata can carry retries_used", updated.meta is not None and updated.meta.get("retries_used") == 1)
+
+
+def test_full_fake_backend_turn() -> None:
+    start_section("full fake backend turn")
+
+    bus = BackendBus()
+    replay = ReplayObserver()
+    bus.subscribe(replay)
+
+    session = Session("fake-turn")
+    bus.publish(session_started(session))
+    ok("fake turn session started event emitted", len(replay.events) == 1)
+
+    audio = ConfigurableFakeAudio(transcript="open notepad", speak_calls=[])
+    audio.start_wake_word()
+    ok("fake audio can start wake word", audio.wake_started is True)
+
+    bus.publish(wake_listening(session_id=session.id))
+    ok("wake listening event emitted in fake turn", any(e.kind == "wake.listening" for e in replay.events))
+
+    orchestrator = FakeOrchestrator(
+        OrchestratorDecision(
+            kind="action",
+            intent="open notepad",
+            tool_calls=[ToolCall("open_app", {"app": "notepad"})],
+            metadata={"source": "fake"},
+        )
+    )
+
+    decision = orchestrator.decide("open notepad")
+    ok("fake orchestrator returns action decision", decision.kind == "action")
+    ok("fake orchestrator returns tool calls", decision.tool_calls is not None and len(decision.tool_calls) == 1)
+    ok("fake orchestrator tool call names the tool", decision.tool_calls[0].tool == "open_app")
+
+    task = Task(
+        id="fake-turn-task",
+        goal="open notepad",
+        steps=[{"tool": "open_app", "app": "notepad"}],
+    )
+    session.active_task = task
+    bus.publish(task_started(task, session_id=session.id))
+    ok("task started event emitted in fake turn", any(e.kind == "task.started" and e.task_id == "fake-turn-task" for e in replay.events))
+
+    runner = ControlledFakeRunner()
+    call = ToolCall("open_app", {"app": "notepad"})
+    result = runner.run(call, task=task)
+    ok("fake tool execution succeeds", result.success is True)
+    ok("fake tool execution records the call", len(runner.calls) == 1)
+
+    bus.publish(tool_finished(session_id=session.id, task_id=task.id, tool="open_app", success=True))
+    ok("tool finished event emitted in fake turn", any(e.kind == "tool.finished" and e.task_id == "fake-turn-task" for e in replay.events))
+
+    task.complete("opened notepad")
+    bus.publish(task_completed(task, session_id=session.id))
+    ok("task completed event emitted in fake turn", any(e.kind == "task.completed" and e.task_id == "fake-turn-task" for e in replay.events))
+
+    audio.speak("Done.")
+    ok("fake audio speaks reply in fake turn", audio.speak_calls == ["Done."])
+
+    session.note_reply("Done.")
+    ok("session records assistant reply in fake turn", session.last_assistant_reply == "Done.")
+
+    from backend.lifecycle import Lifecycle
+
+    lifecycle = Lifecycle(bus, session)
+    lifecycle.mark_started()
+    lifecycle.shutdown()
+    ok("fake turn shutdown completes", lifecycle.running is False)
+    ok("fake turn ends session through lifecycle", any(e.kind == "session.ended" and e.session_id == "fake-turn" for e in replay.events))
+
+
+def test_backend_assembly() -> None:
+    start_section("backend assembly helper")
+
+    from backend.runtime import assemble_backend
+
+    parts = assemble_backend(session_id="assemble-sess")
+    ok("assembly returns expected keys", set(parts.keys()) >= {"bus", "session", "lifecycle", "audio", "tool_runner", "orchestrator"})
+    ok("assembly session id matches request", parts["session"].id == "assemble-sess")
+    ok("assembly lifecycle is started", parts["lifecycle"].running is True)
+    ok("assembly uses fake audio by default", isinstance(parts["audio"], FakeAudioProvider))
+    ok("assembly uses fake tool runner by default", isinstance(parts["tool_runner"], FakeToolRunner))
+
+    replay = ReplayObserver()
+    parts2 = assemble_backend(
+        session_id="assemble-sess-2",
+        observers=[replay],
+        attach_logging=False,
+        audio=ConfigurableFakeAudio(transcript="fake", speak_calls=[]),
+    )
+    ok("assembly accepts custom observers", any(isinstance(o, ReplayObserver) for o in parts2["bus"]._listeners))
+    ok("assembly accepts custom audio", parts2["audio"] is not parts["audio"])
+
 
 def test_validation() -> None:
     start_section("validation")
@@ -484,41 +780,12 @@ def main() -> None:
     test_retry()
     test_event_bus()
     test_logging()
+    test_lifecycle_interrupt_behavior()
+    test_tool_execution_meta()
+    test_tool_registry_single_source()
+    test_full_fake_backend_turn()
+    test_backend_assembly()
     test_validation()
-
-    # Light backend integration checks using fakes
-    start_section("backend integration with fakes")
-
-    session2 = Session("integ-sess")
-    ok("session starts clean for integration", session2.active_task is None)
-
-    bus2 = BackendBus()
-    replay2 = ReplayObserver()
-    bus2.subscribe(replay2)
-
-    bus2.publish(session_started(session2))
-    ok("integration session started event emitted", len(replay2.events) == 1)
-    ok(
-        replay2.events[0].kind == "session.started",
-        "integration session event kind",
-    )
-
-    runner3 = ControlledFakeRunner()
-    call3 = ToolCall("type", {"text": "integration test"})
-    result3 = runner3.run(call3)
-    ok("integration tool call recorded", len(runner3.calls) == 1)
-    ok("integration tool call result is success", result3.success is True)
-
-    orchestrator = FakeOrchestrator(
-        OrchestratorDecision(
-            kind="reply",
-            reply="integration reply",
-            metadata={"source": "fake"},
-        )
-    )
-    decision = orchestrator.decide("hello")
-    ok("fake orchestrator returns scripted decision", decision.kind == "reply")
-    ok("fake orchestrator reply preserved", decision.reply == "integration reply")
 
     print()
     print("--------")

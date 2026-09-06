@@ -22,7 +22,7 @@ import random
 import time
 from typing import Callable, TypeVar
 
-from backend.interfaces import TransientError
+from backend.interfaces import TransientError, ToolResult
 
 T = TypeVar("T")
 
@@ -67,14 +67,17 @@ def retry(
     last_error: Exception | None = None
     attempt = 0
     start = time.monotonic()
+    retry_count = 0
 
     while True:
         attempt += 1
 
         try:
-            return func()
+            result = func()
+            return _attach_meta(result, attempt, retry_count)
         except retryable as e:
             last_error = e
+            retry_count += 1
 
             if attempt >= config.max_attempts:
                 break
@@ -95,6 +98,26 @@ def retry(
         raise last_error
 
     raise RuntimeError("retry exited without result")
+
+
+def attach_retry_meta(result: ToolResult, attempt: int, retries_used: int) -> ToolResult:
+    """Attach lightweight retry metadata to a tool result."""
+    merged = {"attempt": attempt, "retries_used": retries_used}
+    if result.meta:
+        merged.update(result.meta)
+    return ToolResult(
+        tool=result.tool,
+        success=result.success,
+        message=result.message,
+        data=result.data,
+        meta=merged,
+    )
+
+
+def _attach_meta(value: T, attempt: int, retries_used: int) -> T:
+    if isinstance(value, ToolResult):
+        return attach_retry_meta(value, attempt, retries_used)  # type: ignore[return-value]
+    return value
 
 
 def _next_delay(config: RetryConfig, attempt: int) -> float:
