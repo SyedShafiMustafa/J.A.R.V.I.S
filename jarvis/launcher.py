@@ -77,6 +77,8 @@ def run() -> None:
     print(f"[backend] api port: {backend_port}")
     print(f"[ui] dev server port: {ui_port}")
 
+    npm = shutil.which("npm") or "npm"
+
     backend_proc = subprocess.Popen(
         [sys.executable, str(BACKEND_API), "--port", str(backend_port)],
         cwd=str(HERE),
@@ -97,14 +99,18 @@ def run() -> None:
     ui_url = f"http://127.0.0.1:{ui_port}/"
 
     try:
+        print("[launcher] waiting for backend...")
         if not wait_for_url(backend_url, timeout_sec=45):
             print("[launcher] backend did not become ready")
+            _terminate_later(backend_proc, ui_proc)
             sys.exit(1)
 
         print(f"[launcher] backend ready: {backend_url}")
+        print("[launcher] waiting for ui...")
 
         if not wait_for_url(ui_url, timeout_sec=60):
             print("[launcher] ui did not become ready")
+            _terminate_later(backend_proc, ui_proc)
             sys.exit(1)
 
         print(f"[launcher] ui ready: {ui_url}")
@@ -115,23 +121,27 @@ def run() -> None:
 
         print("[launcher] running. press Ctrl+C to stop.\n")
 
-        # Keep the launcher alive while both processes run.
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n[launcher] shutting down...")
     finally:
-        for proc in (backend_proc, ui_proc):
-            if proc.poll() is None:
-                proc.terminate()
-        for proc in (backend_proc, ui_proc):
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+        _terminate_later(backend_proc, ui_proc)
         print("[launcher] stopped")
+
+
+def _terminate_later(backend_proc, ui_proc):
+    if backend_proc.poll() is None:
+        backend_proc.terminate()
+    if ui_proc.poll() is None:
+        ui_proc.terminate()
+    for proc in (backend_proc, ui_proc):
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
 
 
 def main() -> None:

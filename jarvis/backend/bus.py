@@ -247,7 +247,7 @@ class LoggingObserver:
         self.verbose = verbose
 
     def __call__(self, event: BackendEvent) -> None:
-        from backend.logging import log_event
+        from backend.observability import log_event
 
         log_event(
             f"bus.{event.kind.replace('_', '.')}",

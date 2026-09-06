@@ -9,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from backend.validation import validate_backend_startup
-from backend.logging import log_info, log_error
+from backend.observability import log_info, log_error
 from backend.bus import (
     BackendBus,
     wake_detected,

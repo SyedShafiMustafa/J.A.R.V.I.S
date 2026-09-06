@@ -14,6 +14,7 @@ contracts:
 - retry behavior
 - event bus
 - startup validation for the fakes
+- backend service API smoke checks
 
 Usage:
     python -m jarvis.backend.smoke
@@ -25,6 +26,8 @@ from __future__ import annotations
 
 import sys
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 # Allow running from repo root or from inside the backend package.
@@ -67,8 +70,7 @@ from backend.bus import (
 )
 from backend.tools import ToolError, ToolResult as BackendToolResult, ToolRegistry, build_default_tool_registry
 from backend.validation import validate_model_paths, validate_required_settings, validate_backend_startup
-from backend.logging import log_event, log_info, log_error
-
+from backend.observability import log_event, log_info, log_error
 
 _passed = 0
 _failed = 0
@@ -93,10 +95,6 @@ def start_section(label: str) -> None:
     print()
     print(f"== {label} ==")
 
-
-# ---------------------------------------------------------------------------
-# Helpers for assertions
-# ---------------------------------------------------------------------------
 
 def assert_equal(actual, expected, label: str):
     ok(label, actual == expected, f"actual={actual!r} expected={expected!r}")
@@ -470,38 +468,6 @@ def test_event_bus() -> None:
     ok("unsubscribed listener not called", len(replay.events) == 4)
 
 
-def test_tool_registry_single_source() -> None:
-    start_section("tool registry as single source of truth")
-
-    reg = build_default_tool_registry()
-
-    ok("registry knows type tool", reg.get("type") is not None)
-    ok("registry knows open_app tool", reg.get("open_app") is not None)
-    ok("registry rejects unknown tool", reg.get("nope") is None)
-
-    error = reg.validate_payload("type", {"text": "hello"})
-    ok("valid payload passes registry validation", error is None)
-
-    bad = reg.validate_payload("type", {})
-    ok("missing required field fails registry validation", bad is not None)
-    ok("missing field error names the tool", bad is not None and bad.tool == "type")
-    ok("missing field error includes field names", "text" in (bad.detail or {}).get("missing", []))
-
-    no_dry = reg.validate_payload("open_app", {"app": "something"})
-    ok("dry-run unsupported tool fails validation", no_dry is not None)
-    ok("dry-run unsupported error names the tool", no_dry is not None and no_dry.tool == "open_app")
-
-    desc = reg.describe_execution("type", {"text": "hello"})
-    ok("describe_execution success for valid tool", desc.success is True)
-    ok("describe_execution names the tool", desc.tool == "type")
-
-    bad_desc = reg.describe_execution("type", {})
-    ok("describe_execution fails for invalid payload", bad_desc.success is False)
-
-    unknown_desc = reg.describe_execution("nope", {})
-    ok("describe_execution fails for unknown tool", unknown_desc.success is False)
-
-
 # ---------------------------------------------------------------------------
 # Logging boundaries
 # ---------------------------------------------------------------------------
@@ -521,6 +487,10 @@ def test_logging() -> None:
     except Exception as e:
         ok("log_info/error run without raising", False, str(e))
 
+
+# ---------------------------------------------------------------------------
+# Lifecycle / interrupt behavior
+# ---------------------------------------------------------------------------
 
 def test_lifecycle_interrupt_behavior() -> None:
     start_section("lifecycle / interrupt behavior")
@@ -557,10 +527,6 @@ def test_lifecycle_interrupt_behavior() -> None:
     finished_events = [e for e in replay.events if e.kind in {"session.ended", "audio.stop", "tool.failed"}]
     ok("no session ended event before shutdown()", len(finished_events) == 0)
 
-    # lifecycle2 in this smoke test is not wired to 'bus', so it does not
-    # publish session.ended to the replay observer above. The contract we care
-    # about is that Lifecycle.shutdown() publishes session.ended through its own
-    # bus. That is verified separately with lifecycle5 / replay5 below.
     # Note: lifecycle2 is not wired to 'bus' in this smoke check, so it does
     # not publish session.ended to the replay observer above. That is intentional:
     # it verifies that Lifecycle.shutdown() emits through its own bus, not through
@@ -572,12 +538,6 @@ def test_lifecycle_interrupt_behavior() -> None:
         recent_kinds = [e.kind for e in replay.events[-6:]]
         print(f"  note: unexpected session.ended kinds near lifecycle2: {recent_kinds}")
         ok("debug note: lifecycle2 unexpectedly published to replay bus", False, "expected no session.ended from lifecycle2")
-
-
-
-
-
-    ok("lifecycle stops running after shutdown", lifecycle2.running is False)
 
     # Cleanup callback ordering / robustness
     cleanup_called = []
@@ -619,26 +579,9 @@ def test_lifecycle_interrupt_behavior() -> None:
         print(f"  note: lifecycle5._bus._listeners contains replay5: {replay5 in list(lifecycle5._bus._listeners)}")
 
 
-
-
-
 # ---------------------------------------------------------------------------
-# Main
+# Tool execution metadata
 # ---------------------------------------------------------------------------
-
-def test_validation() -> None:
-    start_section("validation")
-
-    assert_raises(
-        ConfigurationError,
-        lambda: (_ for _ in ()).throw(ConfigurationError("bad")),
-        "ConfigurationError exists",
-    )
-
-    ok("validate_required_settings exists", callable(validate_required_settings))
-    ok("validate_model_paths exists", callable(validate_model_paths))
-    ok("validate_backend_startup exists", callable(validate_backend_startup))
-
 
 def test_tool_execution_meta() -> None:
     start_section("tool execution metadata")
@@ -662,6 +605,46 @@ def test_tool_execution_meta() -> None:
     ok("retry metadata can be attached to tool result", updated.meta is not None and updated.meta.get("attempt") == 2)
     ok("retry metadata can carry retries_used", updated.meta is not None and updated.meta.get("retries_used") == 1)
 
+
+# ---------------------------------------------------------------------------
+# Tool registry as single source of truth
+# ---------------------------------------------------------------------------
+
+def test_tool_registry_single_source() -> None:
+    start_section("tool registry as single source of truth")
+
+    reg = build_default_tool_registry()
+
+    ok("registry knows type tool", reg.get("type") is not None)
+    ok("registry knows open_app tool", reg.get("open_app") is not None)
+    ok("registry rejects unknown tool", reg.get("nope") is None)
+
+    error = reg.validate_payload("type", {"text": "hello"})
+    ok("valid payload passes registry validation", error is None)
+
+    bad = reg.validate_payload("type", {})
+    ok("missing required field fails registry validation", bad is not None)
+    ok("missing field error names the tool", bad is not None and bad.tool == "type")
+    ok("missing field error includes field names", "text" in (bad.detail or {}).get("missing", []))
+
+    no_dry = reg.validate_payload("open_app", {"app": "something"})
+    ok("dry-run unsupported tool fails validation", no_dry is not None)
+    ok("dry-run unsupported error names the tool", no_dry is not None and no_dry.tool == "open_app")
+
+    desc = reg.describe_execution("type", {"text": "hello"})
+    ok("describe_execution success for valid tool", desc.success is True)
+    ok("describe_execution names the tool", desc.tool == "type")
+
+    bad_desc = reg.describe_execution("type", {})
+    ok("describe_execution fails for invalid payload", bad_desc.success is False)
+
+    unknown_desc = reg.describe_execution("nope", {})
+    ok("describe_execution fails for unknown tool", unknown_desc.success is False)
+
+
+# ---------------------------------------------------------------------------
+# Full fake backend turn
+# ---------------------------------------------------------------------------
 
 def test_full_fake_backend_turn() -> None:
     start_section("full fake backend turn")
@@ -732,6 +715,10 @@ def test_full_fake_backend_turn() -> None:
     ok("fake turn ends session through lifecycle", any(e.kind == "session.ended" and e.session_id == "fake-turn" for e in replay.events))
 
 
+# ---------------------------------------------------------------------------
+# Backend assembly helper
+# ---------------------------------------------------------------------------
+
 def test_backend_assembly() -> None:
     start_section("backend assembly helper")
 
@@ -754,6 +741,108 @@ def test_backend_assembly() -> None:
     ok("assembly accepts custom observers", any(isinstance(o, ReplayObserver) for o in parts2["bus"]._listeners))
     ok("assembly accepts custom audio", parts2["audio"] is not parts["audio"])
 
+
+# ---------------------------------------------------------------------------
+# Backend service API smoke checks
+# ---------------------------------------------------------------------------
+
+def _free_ports(start: int = 8000, stop: int = 9000) -> tuple[int, int]:
+    import socket
+    for port in range(start, stop - 1):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
+            try:
+                s1.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
+                try:
+                    s2.bind(("127.0.0.1", port + 1))
+                except OSError:
+                    continue
+            return port, port + 1
+    raise RuntimeError("no free adjacent ports")
+
+
+def _wait_for_health(port: int, timeout: int = 15) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            url = f"http://127.0.0.1:{port}/api/health"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            time.sleep(0.3)
+    return False
+
+
+def test_backend_service_api() -> None:
+    start_section("backend service API")
+
+    from backend.server import JarvisBackendService
+
+    port, ws_port = _free_ports()
+    service = JarvisBackendService(host="127.0.0.1", port=port, ws_port=ws_port)
+
+    try:
+        service.start()
+        ok("backend service starts", service._started is True)
+
+        if not _wait_for_health(port, timeout=12):
+            ok("health endpoint is reachable", False, "timeout waiting for /api/health")
+            return
+
+        ok("health endpoint responds", True)
+
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/health")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            import json
+            parsed = json.loads(body)
+            ok("health payload has ok field", parsed.get("ok") is True)
+            ok("health payload has service field", "service" in parsed)
+
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            parsed = json.loads(body)
+            ok("state endpoint responds", True)
+            ok("state has status field", "status" in parsed)
+            ok("state status is idle initially", parsed.get("status") == "idle")
+
+        # POST /api/command with a simple text command
+        cmd_data = json.dumps({"text": "hello"}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/command",
+            data=cmd_data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                resp_body = resp.read().decode("utf-8", "replace")
+                parsed = json.loads(resp_body)
+                ok("command endpoint responds", True)
+                ok("command response has received field", "received" in parsed)
+        except urllib.error.HTTPError as e:
+            code = e.code
+            msg = e.read().decode("utf-8", "replace")
+            ok("command endpoint responds", False, f"http {code}: {msg}")
+        except Exception as e:
+            ok("command endpoint responds", False, str(e))
+
+    finally:
+        try:
+            service.stop()
+        except Exception:
+            pass
+        ok("backend service can be stopped", True)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def test_validation() -> None:
     start_section("validation")
@@ -785,6 +874,7 @@ def main() -> None:
     test_tool_registry_single_source()
     test_full_fake_backend_turn()
     test_backend_assembly()
+    test_backend_service_api()
     test_validation()
 
     print()

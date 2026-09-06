@@ -30,7 +30,7 @@ from backend.bus import (
     wake_listening,
     audio_stop,
 )
-from backend.logging import log_info, log_error
+from backend.observability import log_info, log_error
 from backend.models import Session
 
 

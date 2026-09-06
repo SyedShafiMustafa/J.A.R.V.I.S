@@ -1,104 +1,69 @@
 """
 backend/api.py
 
-Very small API surface the frontend can call during development.
+Real Jarvis backend HTTP + WebSocket entry point.
 
-This is intentionally minimal right now. It exists so the Vite dev
-server can proxy requests to something real instead of failing on
-every frontend request.
+This module starts the Jarvis backend service, which wraps the
+existing runtime pieces and exposes:
+- GET /api/health
+- GET /api/state
+- POST /api/listen/start
+- POST /api/listen/stop
+- POST /api/command
+- WS /ws for real-time events
 
-Later, this can grow into the actual backend HTTP layer without
-changing the frontend contract.
+It is intentionally a service layer, not a stub.
 """
 
 from __future__ import annotations
 
-import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
+import argparse
+import logging
 import sys
+import time
+from pathlib import Path
 
-# Allow backend imports when this module is executed directly from the
-# launcher or from a separate runner process.
 ROOT = Path(__file__).resolve().parent.parent
-# This module is meant to be executed directly by the launcher, so keep
-# import side effects minimal and run self-contained.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-def _ensure_root_on_path() -> None:
-    root = Path(__file__).resolve().parent.parent
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-
-
-class BackendAPIHandler(BaseHTTPRequestHandler):
-    """Stub handler for frontend health/transcript/command calls."""
-
-    def log_message(self, fmt, *args):
-        # Keep console noise manageable during launcher runs.
-        print(f"[api] {fmt % args}")
-
-    def _send_json(self, code: int, payload: object) -> None:
-        data = json.dumps(payload).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self) -> None:
-        if self.path == "/health":
-            self._send_json(200, {"ok": True, "service": "jarvis-backend"})
-            return
-        self._send_json(404, {"error": "not found"})
-
-    def do_POST(self) -> None:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length) if content_length else b"{}"
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError:
-            payload = {}
-
-        if self.path == "/transcript":
-            text = payload.get("text", "")
-            self._send_json(200, {"received": text, "handled": True})
-            return
-
-        if self.path == "/command":
-            command = payload.get("command", "")
-            self._send_json(200, {"received": command, "handled": True})
-            return
-
-        self._send_json(404, {"error": "not found"})
-
-
-def run_api_server(port: int) -> None:
-    _ensure_root_on_path()
-    server = HTTPServer(("127.0.0.1", port), BackendAPIHandler)
-    print(f"[api] backend API stub listening on http://127.0.0.1:{port}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[api] stopping")
-    finally:
-        server.server_close()
-
-
-
+logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
+logger = logging.getLogger("jarvis.api")
 
 
 def main() -> None:
-    port = 8000
-    args = sys.argv[1:]
-    if args and args[0] == "--port" and len(args) > 1:
-        try:
-            port = int(args[1])
-        except ValueError:
-            pass
-    run_api_server(port=port)
+    parser = argparse.ArgumentParser(description="Jarvis backend service")
+    parser.add_argument("--port", type=int, default=8000, help="HTTP + WebSocket port")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="listen host")
+    parser.add_argument("--foreground", action="store_true", help="run in foreground")
+    args = parser.parse_args()
+
+    print(f"[api] starting Jarvis backend on http://{args.host}:{args.port}")
+    print(f"[api] websocket on ws://{args.host}:{args.port}")
+
+    from backend.server import JarvisBackendService
+
+    service = JarvisBackendService(host=args.host, port=args.port)
+    service.start()
+
+    print("[api] ready")
+    print("[api] endpoints:")
+    print("  GET  /api/health")
+    print("  GET  /api/state")
+    print("  POST /api/listen/start")
+    print("  POST /api/listen/stop")
+    print("  POST /api/command")
+    print("  WS   /ws")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[api] stopping")
+    finally:
+        service.stop()
+        print("[api] stopped")
 
 
 if __name__ == "__main__":
-    _ensure_root_on_path()
     main()
