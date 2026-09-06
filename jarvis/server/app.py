@@ -8,9 +8,17 @@ contract (config, logging, database, honest status codes) that every later
 phase builds on:
 
     GET /healthz   liveness  — the process is up (always 200)
-    GET /readyz    readiness — can we actually serve (db probe, 503 if not)
+    GET /readyz    readiness — can we actually serve (db probe + brain probe)
     GET /          service identity + phase map
     GET /docs      FastAPI's interactive API documentation
+
+Phase 1 endpoints are mounted under /api/v1:
+- POST /api/v1/auth/token     pair-code token exchange (stubbed for now)
+- POST /api/v1/devices        register/pair a device
+- GET  /api/v1/devices        list registered devices
+- POST /api/v1/conversations   send a message, get a JARVIS response
+- GET  /api/v1/conversations/{id}
+- WS   /api/v1/inbox          real-time conversation inbox
 
 The factory pattern (`create_app(config=None)`) keeps the app testable: tests
 pass their own ServerConfig pointing at temp directories instead of reaching
@@ -55,6 +63,7 @@ def create_app(config=None):
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
+    from .api_v1 import router as api_v1_router
 
     cfg = config if config is not None else load_config()
 
@@ -113,11 +122,27 @@ def create_app(config=None):
     @app.get("/readyz", tags=["meta"])
     def readyz():
         database = db_ok(cfg)
+        brain_ok = _brain_probe(cfg)
         payload = {
-            "status": "ready" if database else "degraded",
-            "checks": {"database": "ok" if database else "error"},
+            "status": "ready" if (database and brain_ok) else "degraded",
+            "checks": {
+                "database": "ok" if database else "error",
+                "brain": "ok" if brain_ok else "unavailable",
+            },
             "ts": now_iso(),
         }
-        return JSONResponse(payload, status_code=200 if database else 503)
+        return JSONResponse(payload, status_code=200 if (database and brain_ok) else 503)
+
+    app.include_router(api_v1_router)
 
     return app
+
+
+def _brain_probe(cfg) -> bool:
+    """Best-effort brain reachability probe used by /readyz."""
+    import server.brain as _bp
+
+    try:
+        return bool(_bp.BrainClient(cfg).is_healthy())
+    except Exception:
+        return False

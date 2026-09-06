@@ -71,6 +71,11 @@ SQLite bootstrap (WAL, schema version, reopen), and the live app endpoints
 (status codes, readiness, OpenAPI contract, clean shutdown).  The endpoint
 section skips gracefully when fastapi/uvicorn are not installed.
 
+## Lenovo AI brain service
+
+Phase 1 adds the Lenovo brain service on top of this foundation: see
+[`README_phase1_brain.md`](README_phase1_brain.md).
+
 ## Dell deployment
 
 See [`deploy/README.md`](../deploy/README.md) — one-time `setup.ps1`,

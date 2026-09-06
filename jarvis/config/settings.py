@@ -26,6 +26,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")      # "ollama" or "openai"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
 
 # --- Speech-to-text ---
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")   # tiny / base / medium / large-v3-turbo

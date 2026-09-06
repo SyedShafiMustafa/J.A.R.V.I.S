@@ -13,6 +13,7 @@ from pathlib import Path
 from config.settings import (
     LLM_PROVIDER,          # "ollama" or "openai"
     OLLAMA_MODEL,          # from .env, defaults to llama3.1
+    OLLAMA_URL,            # Ollama/Qwen provider endpoint (from .env)
     OPENAI_API_KEY,
     TTS_PROVIDER,
     MEMORY_DB_PATH,        # absolute — no more CWD-dependent paths
@@ -34,4 +35,4 @@ PIPER_MODEL = ROOT / "models" / "piper" / "jarvis.onnx"
 PIPER_CONFIG = ROOT / "models" / "piper" / "jarvis.onnx.json"
 
 # --- Ollama ---
-OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+OLLAMA_URL: str  # resolved from settings.py at runtime using .env
