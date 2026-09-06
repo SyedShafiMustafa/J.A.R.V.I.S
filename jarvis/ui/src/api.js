@@ -1,12 +1,13 @@
 const API_BASE = '/api';
-const WS_BASE = 'ws';
 
 let ws = null;
 let wsResolve = null;
 
 export function createWsUrl() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${proto}://${location.host}`;
+  // Through the Vite dev-server proxy, /ws routes to the backend's
+  // WebSocket endpoint on the same origin.
+  return `${proto}://${location.host}/ws`;
 }
 
 export function connectWebSocket(onEvent) {
@@ -55,15 +56,23 @@ export function disconnectWebSocket() {
 }
 
 export async function fetchJson(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  });
-  const body = await res.json();
-  if (!res.ok) {
-    throw new Error(body.error || `request failed: ${res.status}`);
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? 30000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      ...options,
+    });
+    const body = await res.json();
+    if (!res.ok) {
+      throw new Error(body.error || `request failed: ${res.status}`);
+    }
+    return body;
+  } finally {
+    clearTimeout(timer);
   }
-  return body;
 }
 
 export const api = {

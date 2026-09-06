@@ -1,10 +1,11 @@
-# Jarvis UI
+# Jarvis
 
-Minimal local frontend for Jarvis.
+Local-first desktop AI assistant: voice interface, Ollama-powered reasoning,
+desktop automation, and a React control panel.
 
 ## Quick start
 
-Run everything locally:
+Run everything locally with one command:
 
 ```bash
 cd jarvis
@@ -13,15 +14,22 @@ python launcher.py
 
 This starts:
 
-- the backend API stub
-- the Vite + React UI dev server
+- the backend service (HTTP API + WebSocket event stream) on a free port
+- the Vite + React UI dev server, pointed at that backend
 - opens the UI in your browser automatically
 
 The UI is available at the URL printed by the launcher, usually:
 
 - `http://127.0.0.1:5173`
 
-Stop it with `Ctrl + C`.
+Stop everything with `Ctrl + C`.
+
+First time only (after a fresh clone):
+
+```bash
+cd jarvis/ui
+npm install
+```
 
 ## Frontend-only development
 
@@ -32,58 +40,84 @@ cd jarvis/ui
 npm run dev
 ```
 
+The dev server proxies `/api` and `/ws` to the backend. If you run the UI
+without the launcher, set the backend port with:
+
+```bash
+VITE_BACKEND_PORT=8000 npm run dev
+```
+
+## Backend endpoints
+
+The backend serves everything on one localhost port (8000 by default):
+
+| Method | Path              | Purpose                          |
+| ------ | ----------------- | -------------------------------- |
+| GET    | `/api/health`     | liveness check                   |
+| GET    | `/api/state`      | current runtime state            |
+| POST   | `/api/listen/start` | start the voice loop           |
+| POST   | `/api/listen/stop`  | stop the voice loop            |
+| POST   | `/api/command`    | send a text command              |
+| WS     | `/ws`             | real-time status/reply/tool events |
+
+HTTP errors use real status codes (`400`, `404`, `409`, `415`, `500`, `503`),
+never `200`-with-an-error-payload.
+
+## Runtime construction
+
+The backend builds the runtime explicitly through
+`backend.live_runtime.build_live_runtime()`. It never imports
+`run_voice_test.py`, which is a standalone script with startup side effects
+(model loading, `os._exit()` on validation failure).
+
+If the live runtime dependencies are missing (audio hardware, Ollama, etc.),
+the backend still starts: the UI works, and commands report a clean `503`
+with the reason. `python backend/api.py` prints the reason at startup.
+
 ## Project structure
 
 ```
 jarvis/
 ├── backend/
-│   └── api.py        # minimal backend API stub for the UI
-├── ui/
-│   ├── package.json
-│   ├── vite.config.js
-│   ├── index.html
-│   └── src/
-│       ├── main.jsx
-│       ├── App.jsx
-│       └── api.js
-├── launcher.py       # starts backend + UI together
+│   ├── api.py            # backend service entry point
+│   ├── server.py         # HTTP + WebSocket service (single port)
+│   ├── live_runtime.py   # explicit runtime factory (no import side effects)
+│   ├── live_adapters.py  # live audio/tool/orchestrator adapters
+│   ├── interfaces.py     # backend contracts
+│   ├── tools.py          # tool registry (schemas, idempotency)
+│   ├── observability.py  # structured event logging
+│   ├── bus.py            # event bus
+│   ├── models.py         # session/task model
+│   ├── retry.py          # retry policy
+│   ├── lifecycle.py      # startup/shutdown/interrupt handling
+│   └── smoke.py          # backend test suite (no pytest required)
+├── agents/               # brain + planner
+├── audio/                # wake word, STT, TTS, VAD
+├── core/                 # router, memory
+├── tools/                # desktop/computer/vision automation
+├── ui/                   # Vite + React control panel
+├── launcher.py           # starts backend + UI together
 └── README.md
 ```
 
-## What this is
+## Testing
 
-Right now this is a frontend skeleton, not a full application.
+The backend has a self-contained test suite:
 
-It includes:
+```bash
+cd jarvis
+python backend/smoke.py
+```
 
-- a Vite + React dev setup
-- a minimal status UI
-- an `api.js` module prepared for backend calls
-- a backend proxy so `/api/*` requests can go to the backend during development
+It covers contracts, lifecycle, retries, tool registry/safety, the HTTP API
+(status codes), the WebSocket event stream, and runtime construction.
 
-It is intentionally bare so the UI can be redesigned later without
-untangling a large existing interface.
+## Safety notes
 
-## Backend proxy
-
-The Vite dev server proxies requests from `/api` to the backend API
-stub running locally.
-
-That means the frontend can call:
-
-- `/api/health`
-- `/api/transcript`
-- `/api/command`
-
-without hardcoding the backend host in the UI code.
-
-## What to build next
-
-This skeleton gives you a working starting point. The next step is usually:
-
-- decide on the actual UI state you want to show
-- connect the UI to real backend behavior
-- add the screens, flows, and interactions you want
-
-`api.js` is the place to grow the frontend/backend contract as the
-backend becomes more complete.
+- Desktop tools are validated against the tool registry before execution;
+  unknown tools fail instead of silently succeeding.
+- Retries only apply to idempotent tools, so typing/clicking/sending is
+  never duplicated by a retry.
+- Shell commands are built as argument lists, not shell strings, and
+  app names are validated before use.
+- The backend binds to `127.0.0.1` only.

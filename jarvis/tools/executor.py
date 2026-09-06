@@ -79,6 +79,7 @@ class TaskExecutor:
 
             else:
                 print(f"Unknown tool: {tool}")
+                return False
 
         print("\n✅ Task completed.")
         return True

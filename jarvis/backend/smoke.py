@@ -24,6 +24,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 import urllib.request
@@ -743,24 +744,19 @@ def test_backend_assembly() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Backend service API smoke checks
+# Backend service API smoke checks (single port: HTTP + WebSocket)
 # ---------------------------------------------------------------------------
 
-def _free_ports(start: int = 8000, stop: int = 9000) -> tuple[int, int]:
+def _free_port(start: int = 8000, stop: int = 9000) -> int:
     import socket
-    for port in range(start, stop - 1):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s1:
+    for port in range(start, stop):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
-                s1.bind(("127.0.0.1", port))
+                s.bind(("127.0.0.1", port))
             except OSError:
                 continue
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
-                try:
-                    s2.bind(("127.0.0.1", port + 1))
-                except OSError:
-                    continue
-            return port, port + 1
-    raise RuntimeError("no free adjacent ports")
+        return port
+    raise RuntimeError("no free port")
 
 
 def _wait_for_health(port: int, timeout: int = 15) -> bool:
@@ -777,13 +773,44 @@ def _wait_for_health(port: int, timeout: int = 15) -> bool:
     return False
 
 
+def _http(method: str, port: int, path: str, payload=None, content_type: str | None = None):
+    """Do an HTTP request; return (status_code, parsed_body_or_None)."""
+    import urllib.error
+
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = content_type or "application/json"
+
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", "replace")
+            try:
+                return resp.status, json.loads(body)
+            except Exception:
+                return resp.status, None
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(body)
+        except Exception:
+            return e.code, None
+
+
 def test_backend_service_api() -> None:
     start_section("backend service API")
 
     from backend.server import JarvisBackendService
 
-    port, ws_port = _free_ports()
-    service = JarvisBackendService(host="127.0.0.1", port=port, ws_port=ws_port)
+    port = _free_port()
+    service = JarvisBackendService(host="127.0.0.1", port=port)
 
     try:
         service.start()
@@ -793,44 +820,60 @@ def test_backend_service_api() -> None:
             ok("health endpoint is reachable", False, "timeout waiting for /api/health")
             return
 
-        ok("health endpoint responds", True)
+        ok("health endpoint is reachable", True)
 
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/health")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            body = resp.read().decode("utf-8", "replace")
-            import json
-            parsed = json.loads(body)
-            ok("health payload has ok field", parsed.get("ok") is True)
-            ok("health payload has service field", "service" in parsed)
+        status, parsed = _http("GET", port, "/api/health")
+        ok("health returns 200", status == 200)
+        ok("health payload has ok field", parsed is not None and parsed.get("ok") is True)
+        ok("health payload has service field", parsed is not None and "service" in parsed)
 
-        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/state")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            body = resp.read().decode("utf-8", "replace")
-            parsed = json.loads(body)
-            ok("state endpoint responds", True)
-            ok("state has status field", "status" in parsed)
-            ok("state status is idle initially", parsed.get("status") == "idle")
+        status, parsed = _http("GET", port, "/api/state")
+        ok("state returns 200", status == 200)
+        ok("state has status field", parsed is not None and "status" in parsed)
+        ok("state status is idle initially", parsed is not None and parsed.get("status") == "idle")
 
-        # POST /api/command with a simple text command
-        cmd_data = json.dumps({"text": "hello"}).encode("utf-8")
+        # Honest error contract: real status codes, not 200-masquerading-errors.
+        status, parsed = _http("GET", port, "/api/nope")
+        ok("unknown GET route returns real 404", status == 404)
+        ok("404 carries an error payload", parsed is not None and "error" in parsed)
+
+        status, parsed = _http("POST", port, "/api/command", payload={"text": "hi"}, content_type="text/plain")
+        ok("non-json content type returns 415", status == 415)
+
         req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/command",
-            data=cmd_data,
+            data=b"{not json",
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                resp_body = resp.read().decode("utf-8", "replace")
-                parsed = json.loads(resp_body)
-                ok("command endpoint responds", True)
-                ok("command response has received field", "received" in parsed)
+            urllib.request.urlopen(req, timeout=5)
+            ok("invalid json returns 400", False)
         except urllib.error.HTTPError as e:
-            code = e.code
-            msg = e.read().decode("utf-8", "replace")
-            ok("command endpoint responds", False, f"http {code}: {msg}")
-        except Exception as e:
-            ok("command endpoint responds", False, str(e))
+            ok("invalid json returns 400", e.code == 400)
+
+        status, parsed = _http("POST", port, "/api/command", payload={"text": "  "})
+        ok("empty command returns 400", status == 400)
+
+        # Command dispatch depends on the environment: with the live runtime
+        # present it accepts the command; without it, it reports a clean 503.
+        status, parsed = _http("POST", port, "/api/command", payload={"text": "hello"})
+        if status == 200:
+            ok("command accepted when runtime available", parsed is not None and "received" in parsed)
+        elif status == 503:
+            ok("command reports 503 when runtime unavailable", parsed is not None and "error" in parsed)
+        else:
+            ok("command returns 200 or 503", False, f"unexpected status {status}")
+
+        # Listening: 409 on duplicate start / stop-without-start, using the
+        # flag directly so the smoke test never touches audio hardware.
+        service._voice_mode = True
+        status, parsed = _http("POST", port, "/api/listen/start", payload={})
+        ok("duplicate listen/start returns 409", status == 409)
+        service._voice_mode = False
+
+        status, parsed = _http("POST", port, "/api/listen/stop", payload={})
+        ok("listen/stop when not listening returns 409", status == 409)
 
     finally:
         try:
@@ -838,6 +881,239 @@ def test_backend_service_api() -> None:
         except Exception:
             pass
         ok("backend service can be stopped", True)
+
+
+# ---------------------------------------------------------------------------
+# WebSocket event stream (single port, raw-socket client)
+# ---------------------------------------------------------------------------
+
+def _ws_connect(port: int, timeout: int = 6):
+    """Open a WebSocket connection; return the socket or None on failure."""
+    import base64
+    import os
+    import socket
+
+    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    request = (
+        f"GET /ws HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: {key}\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n"
+    )
+    s.sendall(request.encode("ascii"))
+
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+
+    status_line = data.split(b"\r\n", 1)[0]
+    if b"101" not in status_line:
+        s.close()
+        return None
+    return s
+
+
+def _ws_send_masked_text(sock, text: str) -> None:
+    payload = text.encode("utf-8")
+    mask = bytes([0x11, 0x22, 0x33, 0x44])
+    masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    frame = b"\x81" + bytes([0x80 | len(payload)]) + mask + masked
+    sock.sendall(frame)
+
+
+def _ws_recv_frame(sock, timeout: int = 6):
+    """Read one server frame; return (opcode, payload) or None."""
+    sock.settimeout(timeout)
+    try:
+        first = sock.recv(1)
+        if not first:
+            return None
+        second = sock.recv(1)
+        if not second:
+            return None
+    except Exception:
+        return None
+
+    opcode = first[0] & 0x0F
+    length = second[0] & 0x7F
+    if length == 126:
+        ext = sock.recv(2)
+        if len(ext) < 2:
+            return None
+        length = int.from_bytes(ext, "big")
+    elif length == 127:
+        ext = sock.recv(8)
+        if len(ext) < 8:
+            return None
+        length = int.from_bytes(ext, "big")
+
+    payload = b""
+    while len(payload) < length:
+        chunk = sock.recv(length - len(payload))
+        if not chunk:
+            return None
+        payload += chunk
+    return opcode, payload
+
+
+def test_backend_websocket() -> None:
+    start_section("backend websocket (single port)")
+
+    from backend.server import JarvisBackendService
+
+    port = _free_port()
+    service = JarvisBackendService(host="127.0.0.1", port=port)
+
+    try:
+        service.start()
+        if not _wait_for_health(port, timeout=12):
+            ok("ws test server started", False, "health timeout")
+            return
+
+        ok("ws test server started", True)
+
+        sock = _ws_connect(port)
+        ok("ws handshake returns 101", sock is not None)
+        if sock is None:
+            return
+
+        _ws_send_masked_text(sock, '{"type": "ping"}')
+        frame = _ws_recv_frame(sock)
+        ok("ws answers ping with a text frame", frame is not None and frame[0] == 0x1)
+        if frame is not None:
+            try:
+                data = json.loads(frame[1].decode("utf-8"))
+                ok("pong payload type is pong", data.get("type") == "pong")
+            except Exception:
+                ok("pong payload parses as json", False)
+
+        _ws_send_masked_text(sock, '{"type": "subscribe"}')
+        seen = set()
+        for _ in range(3):
+            fr = _ws_recv_frame(sock)
+            if fr is None:
+                break
+            try:
+                d = json.loads(fr[1].decode("utf-8"))
+                seen.add(d.get("type"))
+            except Exception:
+                pass
+        ok("subscribe is acknowledged", "subscribed" in seen)
+
+        sock.close()
+    finally:
+        try:
+            service.stop()
+        except Exception:
+            pass
+        ok("ws server can be stopped", True)
+
+
+# ---------------------------------------------------------------------------
+# Live runtime construction safety
+# ---------------------------------------------------------------------------
+
+def test_live_runtime_safety() -> None:
+    start_section("live runtime construction safety")
+
+    from backend.live_runtime import build_live_runtime, RuntimeUnavailableError
+
+    try:
+        runtime = build_live_runtime(session_id="live-check")
+        ok("live runtime builds when deps present", runtime["session"].id == "live-check")
+        required = {"bus", "session", "lifecycle", "audio", "tool_runner", "orchestrator", "brain", "planner", "memory", "router"}
+        ok("live runtime exposes all handles", set(runtime.keys()) >= required)
+    except RuntimeUnavailableError as exc:
+        ok("live runtime fails cleanly when deps missing", "live runtime" in str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Tool runner safety (unknown tools, idempotent-only retries)
+# ---------------------------------------------------------------------------
+
+def test_tool_runner_safety() -> None:
+    start_section("tool runner safety (unknown tools / retries)")
+
+    from backend.bus import BackendBus
+    from backend.interfaces import ToolCall
+    from backend.tools import ToolDefinition, ToolRegistry
+    from backend.live_adapters import LiveToolRunner
+
+    reg = ToolRegistry()
+    reg.register(ToolDefinition(
+        name="type",
+        description="type text",
+        supports_dry_run=True,
+        input_fields=[{"name": "text", "type": "string", "required": True}],
+        idempotent=False,
+    ))
+    reg.register(ToolDefinition(
+        name="system_info",
+        description="read system info",
+        supports_dry_run=True,
+        input_fields=[],
+        idempotent=True,
+    ))
+
+    ok("tool definition records idempotency",
+       reg.get("type").idempotent is False and reg.get("system_info").idempotent is True)
+    ok("describe includes idempotent flag", reg.get("system_info").describe()["idempotent"] is True)
+
+    # Unknown tool must fail, never silently succeed. Build the runner
+    # without touching desktop dependencies by bypassing __init__.
+    runner = object.__new__(LiveToolRunner)
+    runner.bus = BackendBus()
+    runner._session_id = None
+    runner._registry = reg
+
+    result = runner.run(ToolCall("nope", {}))
+    ok("unknown tool is rejected", result.success is False and "Unknown tool" in result.message)
+
+    # Non-idempotent tools must not be retried (a retry could duplicate
+    # typing/clicking side effects): a transient failure raises once.
+    class FailingExecutor:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, plan):
+            self.calls += 1
+            raise TransientError("boom")
+
+    non_idem = object.__new__(LiveToolRunner)
+    non_idem.bus = BackendBus()
+    non_idem._session_id = None
+    non_idem._registry = reg
+    non_idem._retry_config = RetryConfig(max_attempts=3, base_delay_s=0.0, max_delay_s=0.01, jitter=False)
+    non_idem._executor = FailingExecutor()
+
+    try:
+        non_idem.run(ToolCall("type", {"text": "hi"}))
+        ok("non-idempotent transient failure raises", False)
+    except TransientError:
+        ok("non-idempotent transient failure raises", True)
+    ok("non-idempotent tool is not retried", non_idem._executor.calls == 1)
+
+    # Idempotent tools may be retried up to the configured cap.
+    idem = object.__new__(LiveToolRunner)
+    idem.bus = BackendBus()
+    idem._session_id = None
+    idem._registry = reg
+    idem._retry_config = RetryConfig(max_attempts=3, base_delay_s=0.0, max_delay_s=0.01, jitter=False)
+    idem._executor = FailingExecutor()
+
+    try:
+        idem.run(ToolCall("system_info", {}))
+        ok("idempotent tool raises after retries", False)
+    except TransientError:
+        ok("idempotent tool raises after retries", True)
+    ok("idempotent tool is retried up to the cap", idem._executor.calls == 3)
 
 
 # ---------------------------------------------------------------------------
@@ -875,6 +1151,9 @@ def main() -> None:
     test_full_fake_backend_turn()
     test_backend_assembly()
     test_backend_service_api()
+    test_backend_websocket()
+    test_live_runtime_safety()
+    test_tool_runner_safety()
     test_validation()
 
     print()

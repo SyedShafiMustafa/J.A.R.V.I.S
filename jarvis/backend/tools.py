@@ -55,6 +55,7 @@ class ToolDefinition:
     description: str
     supports_dry_run: bool = False
     input_fields: list[dict[str, Any]] = field(default_factory=list)
+    idempotent: bool = False
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -62,6 +63,7 @@ class ToolDefinition:
             "description": self.description,
             "supports_dry_run": self.supports_dry_run,
             "input_fields": list(self.input_fields),
+            "idempotent": self.idempotent,
         }
 
 

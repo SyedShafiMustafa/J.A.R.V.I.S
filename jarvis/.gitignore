@@ -1,5 +1,8 @@
 node_modules/
 dist/
+logs/
+__pycache__/
+*.pyc
 ._vite_check_out.txt
 ._vite_body.txt
 ._api_check.py

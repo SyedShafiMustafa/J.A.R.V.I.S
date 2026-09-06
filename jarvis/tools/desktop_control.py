@@ -1,8 +1,14 @@
 import os
+import re
 import subprocess
 import webbrowser
 from pathlib import Path
 from urllib.parse import quote_plus
+
+# Values coming from LLM-generated plans are user- or model-controlled.
+# Before interpolating an app name into a PowerShell script or using it
+# to build a command line, require it to be a plain safe identifier.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9 ._()-]+$")
 
 
 class DesktopController:
@@ -76,21 +82,26 @@ class DesktopController:
             return True
 
         # 2. Microsoft Store apps (WhatsApp, Spotify, etc.)
-        try:
-            ps_script = f"""
-            $app = Get-StartApps |
-                Where-Object {{$_.Name -like '*{app}*'}} |
-                Select-Object -First 1
+        # The app name is passed as a script argument ($args[0]) instead of
+        # being interpolated into the script body, and it must match a safe
+        # identifier pattern before it is used at all.
+        if not _SAFE_NAME.match(app):
+            print(f"App name rejected (unsafe characters): {app}")
+            return False
 
-            if ($app) {{
-                Start-Process ("shell:AppsFolder\\" + $app.AppID)
-            }}
-            """
+        try:
+            ps_script = (
+                "$app = Get-StartApps | "
+                "Where-Object { $_.Name -like ('*' + $args[0] + '*') } | "
+                "Select-Object -First 1; "
+                "if ($app) { Start-Process ('shell:AppsFolder\\' + $app.AppID) }"
+            )
 
             result = subprocess.run(
-                ["powershell", "-Command", ps_script],
+                ["powershell", "-NoProfile", "-Command", ps_script, app],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=15
             )
 
             # If PowerShell executed successfully, assume it launched
@@ -111,7 +122,18 @@ class DesktopController:
         app = app.lower().strip()
 
         # 1. Direct guess: <app>.exe
-        os.system(f'taskkill /IM "{app}.exe" /F >nul 2>&1')
+        # Use an argument list (no shell) so app-controlled input can never
+        # be interpreted as shell syntax.
+        if _SAFE_NAME.match(app):
+            try:
+                subprocess.run(
+                    ["taskkill", "/IM", f"{app}.exe", "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+            except Exception:
+                pass
 
         # 2. Fallback: scan real process names and kill any that match
         #    a word of the app name (handles "visual studio code" -> Code.exe)
@@ -134,7 +156,15 @@ class DesktopController:
 
                 for word in app.split():
                     if len(word) > 2 and word in stem:
-                        os.system(f'taskkill /IM "{proc}" /F >nul 2>&1')
+                        try:
+                            subprocess.run(
+                                ["taskkill", "/IM", proc, "/F"],
+                                capture_output=True,
+                                text=True,
+                                timeout=10
+                            )
+                        except Exception:
+                            pass
                         return
 
         except Exception:

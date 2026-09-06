@@ -4,7 +4,7 @@ backend/api.py
 Real Jarvis backend HTTP + WebSocket entry point.
 
 This module starts the Jarvis backend service, which wraps the
-existing runtime pieces and exposes:
+existing runtime pieces and exposes, on one port:
 - GET /api/health
 - GET /api/state
 - POST /api/listen/start
@@ -35,16 +35,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Jarvis backend service")
     parser.add_argument("--port", type=int, default=8000, help="HTTP + WebSocket port")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="listen host")
-    parser.add_argument("--foreground", action="store_true", help="run in foreground")
     args = parser.parse_args()
 
     print(f"[api] starting Jarvis backend on http://{args.host}:{args.port}")
-    print(f"[api] websocket on ws://{args.host}:{args.port}")
+    print(f"[api] websocket on ws://{args.host}:{args.port}/ws")
 
     from backend.server import JarvisBackendService
 
     service = JarvisBackendService(host=args.host, port=args.port)
     service.start()
+
+    runtime_msg = service.runtime_unavailable_message()
+    if runtime_msg:
+        print(f"[api] note: live runtime unavailable ({runtime_msg})")
+        print("[api] note: the UI will still work; commands will report a clean 503")
+    else:
+        print("[api] live runtime ready")
 
     print("[api] ready")
     print("[api] endpoints:")

@@ -1,36 +1,40 @@
 """
 launcher.py
 
-Starts the Jarvis backend API stub and the Vite UI dev server together.
+Starts the Jarvis backend service and the Vite UI dev server together.
 
 This is the simple local entry point for development and demos.
 
 Usage:
-    python launcher.py
+    python launcher.py [--no-browser]
 
 Behavior:
-    - starts the backend API on a free port
-    - starts the UI dev server on a free port
-    - waits for both to become reachable
+    - starts the backend service on a free port
+    - starts the UI dev server on a free port, pointed at that backend
+    - waits for both to become reachable (real HTTP status, not 200-masquerading-errors)
     - prints the UI URL and opens it in the default browser
+    - streams child output to logs/backend.log and logs/ui.log so
+      failures are diagnosable instead of swallowed
     - shuts both processes down cleanly on Ctrl+C
 """
 
 from __future__ import annotations
 
 import os
-import signal
 import shutil
 import socket
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 UI_DIR = HERE / "ui"
 BACKEND_API = HERE / "backend" / "api.py"
+LOGS_DIR = HERE / "logs"
 
 
 def find_free_port(start: int = 8000, stop: int = 9000) -> int:
@@ -45,64 +49,83 @@ def find_free_port(start: int = 8000, stop: int = 9000) -> int:
 
 
 def wait_for_url(url: str, timeout_sec: int = 60) -> bool:
+    """Wait until the URL returns an actual HTTP 200 with valid JSON."""
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         try:
-            req = urllib_request(url)
-            with urllib_request_urlopen(req, timeout=3) as resp:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=3) as resp:
                 if resp.status == 200:
+                    resp.read()
                     return True
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+            pass
         except Exception:
             pass
         time.sleep(1)
     return False
 
 
-def urllib_request(url: str):
-    import urllib.request
-    return urllib.request.Request(url)
+def tail(path: Path, n: int = 30) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-n:])
+    except Exception:
+        return "(no log output yet)"
 
 
-def urllib_request_urlopen(req, timeout: int = 3):
-    import urllib.request
-    return urllib.request.urlopen(req, timeout=timeout)
+def run(no_browser: bool = False) -> None:
+    # Make launcher prints show up immediately even when redirected to a file.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
 
+    LOGS_DIR.mkdir(exist_ok=True)
 
-def run() -> None:
     backend_port = find_free_port()
     ui_port = find_free_port(start=5173, stop=5250)
 
     npm = shutil.which("npm") or "npm"
 
-    print(f"[backend] api port: {backend_port}")
-    print(f"[ui] dev server port: {ui_port}")
+    print(f"[launcher] backend port: {backend_port}")
+    print(f"[launcher] ui port: {ui_port}")
 
-    npm = shutil.which("npm") or "npm"
+    backend_log = open(LOGS_DIR / "backend.log", "w", encoding="utf-8")
+    ui_log = open(LOGS_DIR / "ui.log", "w", encoding="utf-8")
+
+    # Backend port is passed to Vite through the environment so the proxy
+    # config can target the actual backend, not a hard-coded 8000.
+    env = dict(os.environ)
+    env["VITE_BACKEND_PORT"] = str(backend_port)
 
     backend_proc = subprocess.Popen(
         [sys.executable, str(BACKEND_API), "--port", str(backend_port)],
         cwd=str(HERE),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=backend_log,
+        stderr=subprocess.STDOUT,
         text=True,
     )
 
     ui_proc = subprocess.Popen(
         [npm, "run", "dev", "--", "--port", str(ui_port)],
         cwd=str(UI_DIR),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        env=env,
+        stdout=ui_log,
+        stderr=subprocess.STDOUT,
         text=True,
     )
 
-    backend_url = f"http://127.0.0.1:{backend_port}/health"
+    backend_url = f"http://127.0.0.1:{backend_port}/api/health"
     ui_url = f"http://127.0.0.1:{ui_port}/"
 
     try:
         print("[launcher] waiting for backend...")
         if not wait_for_url(backend_url, timeout_sec=45):
             print("[launcher] backend did not become ready")
-            _terminate_later(backend_proc, ui_proc)
+            print("[launcher] backend.log tail:\n" + tail(LOGS_DIR / "backend.log"))
+            _terminate(backend_proc, ui_proc)
             sys.exit(1)
 
         print(f"[launcher] backend ready: {backend_url}")
@@ -110,16 +133,18 @@ def run() -> None:
 
         if not wait_for_url(ui_url, timeout_sec=60):
             print("[launcher] ui did not become ready")
-            _terminate_later(backend_proc, ui_proc)
+            print("[launcher] ui.log tail:\n" + tail(LOGS_DIR / "ui.log"))
+            _terminate(backend_proc, ui_proc)
             sys.exit(1)
 
         print(f"[launcher] ui ready: {ui_url}")
         print("[launcher] opening browser...")
 
-        if not webbrowser.open(ui_url):
+        if not no_browser and not webbrowser.open(ui_url):
             print(f"[launcher] could not auto-open browser; open manually: {ui_url}")
 
-        print("[launcher] running. press Ctrl+C to stop.\n")
+        print("[launcher] running. press Ctrl+C to stop.")
+        print(f"[launcher] logs: {LOGS_DIR / 'backend.log'}, {LOGS_DIR / 'ui.log'}\n")
 
         try:
             while True:
@@ -127,16 +152,17 @@ def run() -> None:
         except KeyboardInterrupt:
             print("\n[launcher] shutting down...")
     finally:
-        _terminate_later(backend_proc, ui_proc)
+        _terminate(backend_proc, ui_proc)
+        backend_log.close()
+        ui_log.close()
         print("[launcher] stopped")
 
 
-def _terminate_later(backend_proc, ui_proc):
-    if backend_proc.poll() is None:
-        backend_proc.terminate()
-    if ui_proc.poll() is None:
-        ui_proc.terminate()
-    for proc in (backend_proc, ui_proc):
+def _terminate(*procs: subprocess.Popen) -> None:
+    for proc in procs:
+        if proc.poll() is None:
+            proc.terminate()
+    for proc in procs:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -145,7 +171,8 @@ def _terminate_later(backend_proc, ui_proc):
 
 
 def main() -> None:
-    run()
+    no_browser = "--no-browser" in sys.argv
+    run(no_browser=no_browser)
 
 
 if __name__ == "__main__":
