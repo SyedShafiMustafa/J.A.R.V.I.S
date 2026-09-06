@@ -27,6 +27,25 @@ from backend.bus import (
     task_failed,
     LoggingObserver,
 )
+from typing import Callable
+
+from backend.bus import (
+    BackendBus,
+    wake_detected,
+    wake_listening,
+    audio_start,
+    audio_stop,
+    transcription_ready,
+    tool_started,
+    tool_finished,
+    tool_failed,
+    user_interrupt,
+    session_started,
+    task_started,
+    task_completed,
+    task_failed,
+    LoggingObserver,
+)
 from backend.lifecycle import Lifecycle, make_audio_cleanup
 from backend.retry import retry, RetryConfig
 from backend.tools import (
@@ -300,6 +319,41 @@ def _is_action_request(text: str) -> bool:
 
 
 # --------------------------------------------------
+# WAKE HANDLER HOCK
+# --------------------------------------------------
+
+def _make_wake_handler() -> "WakeHandler":
+    """Build the backend wake-handoff hook for this runtime."""
+
+    return WakeHandler(
+        wake_responses=WAKE_RESPONSES,
+        on_wake_start=lambda: bus.publish(wake_listening(session_id=session.id)),
+    )
+
+
+class WakeHandler:
+    """Explicit backend hook for wake detection handoff.
+
+    This gives the wake path one clear place to start a session,
+    choose a wake response, and announce listening state through
+    the bus instead of scattering it across the conversation loop.
+    """
+
+    def __init__(
+        self,
+        *,
+        wake_responses: list[str],
+        on_wake_start: Callable[[], None],
+    ) -> None:
+        self.wake_responses = wake_responses
+        self.on_wake_start = on_wake_start
+
+    def respond_to_wake(self) -> str:
+        self.on_wake_start()
+        return random.choice(self.wake_responses)
+
+
+# --------------------------------------------------
 # INITIALIZE
 # --------------------------------------------------
 
@@ -563,7 +617,17 @@ def conversation():
     if lifecycle.shutdown_requested:
         return
 
+    wake_handler = _make_wake_handler()
+
     bus.publish(wake_detected(session_id=session.id))
+
+    wake_response = wake_handler.respond_to_wake()
+    bus.publish(wake_listening(session_id=session.id))
+    audio.speak(wake_response)
+    audio.wait()
+
+    if lifecycle.shutdown_requested:
+        return
 
     timeout = time.time() + 30
 
