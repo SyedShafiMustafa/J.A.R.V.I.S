@@ -1,0 +1,12 @@
+# JARVIS V2 — Dell always-on server runtime (Phase 0)
+#
+# Install inside the server virtual environment:
+#     .venv-server\Scripts\python.exe -m pip install -r requirements-server.txt
+#
+# Kept intentionally separate from requirements.txt (the legacy Lenovo voice
+# runtime) so the Dell stays lean.  Later phases add memory/tool/telephony
+# dependencies here as needed.
+fastapi>=0.111
+uvicorn>=0.30
+python-dotenv>=1.0
+pydantic>=2.7

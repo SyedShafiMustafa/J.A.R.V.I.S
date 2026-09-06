@@ -96,6 +96,8 @@ jarvis/
 ├── core/                 # router, memory
 ├── tools/                # desktop/computer/vision automation
 ├── ui/                   # Vite + React control panel
+├── server/               # JARVIS V2: Dell always-on server (FastAPI)
+├── deploy/               # Dell deployment scripts + runbook
 ├── launcher.py           # starts backend + UI together
 └── README.md
 ```
@@ -121,3 +123,25 @@ It covers contracts, lifecycle, retries, tool registry/safety, the HTTP API
 - Shell commands are built as argument lists, not shell strings, and
   app names are validated before use.
 - The backend binds to `127.0.0.1` only.
+
+## JARVIS V2 - roadmap (two-machine architecture)
+
+JARVIS is evolving into one persistent AI identity reachable from laptop,
+phone, dashboard and phone calls, with two machines:
+
+| Machine | Role   | Responsibility |
+| ------- | ------ | -------------- |
+| Dell    | server | always-on FastAPI core: memory, scheduler, tasks, telephony, callbacks, WebSockets, auth |
+| Lenovo  | brain  | heavy local LLM inference (Qwen/Ollama), agents, development |
+
+### Phase status
+
+| Phase | Deliverable | Status |
+| ----- | ----------- | ------ |
+| 0 | Infrastructure: `server/` FastAPI foundation, config validation, rotating logs, SQLite bootstrap, health endpoints, Dell auto-start scripts | **done** |
+| 1 | JARVIS core: auth/tokens, device pairing, conversation + WebSocket API, LLM adapter (calls the Lenovo brain), basic memory | next |
+| 2-12 | Voice, memory, tools, Android, telephony, reservations, callbacks, WhatsApp | planned |
+
+Phase 0 details live in [`server/README.md`](server/README.md) and the Dell
+runbook in [`deploy/README.md`](deploy/README.md).  Each phase must work
+and be tested before the next begins.
