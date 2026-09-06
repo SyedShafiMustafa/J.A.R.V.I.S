@@ -64,6 +64,7 @@ def create_app(config=None):
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
     from .api_v1 import router as api_v1_router
+    from .chat_v1 import router as chat_router
 
     cfg = config if config is not None else load_config()
 
@@ -134,6 +135,7 @@ def create_app(config=None):
         return JSONResponse(payload, status_code=200 if (database and brain_ok) else 503)
 
     app.include_router(api_v1_router)
+    app.include_router(chat_router)
 
     return app
 
