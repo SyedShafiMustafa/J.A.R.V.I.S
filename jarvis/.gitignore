@@ -1,0 +1,12 @@
+node_modules/
+dist/
+._vite_check_out.txt
+._vite_body.txt
+._api_check.py
+._api_check2.py
+._api_runner.py
+._launcher_check.py
+._ui_serve_check.py
+._ui_serve_check2.py
+._ui_serve_check3.py
+._vite_runner.py
