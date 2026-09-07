@@ -2,22 +2,31 @@
 Voice → Brain → Response loop
 
 Loads WhisperModel once, then loops:
-  wait for speech → record while speaking → stop after silence → transcribe → chat → repeat
+  wait for speech → record while speaking → stop after silence → transcribe → chat → speak → repeat
 
-Uses energy-based voice activity detection (VAD) instead of a fixed recording window.
+Uses energy-based voice activity detection (VAD) and pyttsx3 for TTS.
 
 Press Ctrl+C to exit.
 
 Flow:
-  🎤 Microphone → VAD → sounddevice → Faster-Whisper → text → Dell /api/v1/chat → Lenovo brain → response
+  🎤 Microphone → VAD → Faster-Whisper → text → Dell /api/v1/chat → Lenovo brain → response → 🔊 speaker
 """
 
+import os
 import sys
 import time
 import json
 import urllib.request
 import urllib.error
 import numpy as np
+
+# Fix Windows console encoding for emoji output
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONUTF8", "1")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Config
@@ -124,6 +133,18 @@ def transcribe(model, audio):
     return transcript
 
 
+def speak(text, engine):
+    """Speak text aloud using a pre-initialized pyttsx3 engine."""
+    if not text:
+        return
+    print("🔊 Speaking...")
+    t0 = time.perf_counter()
+    engine.say(text)
+    engine.runAndWait()
+    elapsed = time.perf_counter() - t0
+    print(f"🔊 Done speaking. ({elapsed:.2f}s)")
+
+
 def chat(transcript):
     """Send the transcript to the Dell /api/v1/chat endpoint and return the response."""
     payload = json.dumps({
@@ -160,7 +181,20 @@ def main():
     t0 = time.perf_counter()
     model = WhisperModel("tiny", device="cpu", compute_type="int8")
     model_time = time.perf_counter() - t0
-    print(f"⏳ WhisperModel ready. ({model_time:.2f}s)\n")
+    print(f"⏳ WhisperModel ready. ({model_time:.2f}s)")
+
+    # ------------------------------------------------------------------
+    # Load TTS engine once
+    # ------------------------------------------------------------------
+    import pyttsx3
+
+    print("⏳ Loading TTS engine (one-time)...")
+    t0 = time.perf_counter()
+    tts_engine = pyttsx3.init()
+    tts_engine.setProperty("rate", 175)    # words per minute
+    tts_engine.setProperty("volume", 1.0)  # 0.0 to 1.0
+    tts_time = time.perf_counter() - t0
+    print(f"⏳ TTS engine ready. ({tts_time:.2f}s)\n")
     print("Voice loop active — press Ctrl+C to exit.\n")
 
     # ------------------------------------------------------------------
@@ -195,6 +229,8 @@ def main():
 
             if response:
                 print(f"\n🤖 JARVIS: {response}\n")
+                # 4. Speak
+                speak(response, tts_engine)
             else:
                 print("❌ No response from JARVIS.\n")
                 continue
