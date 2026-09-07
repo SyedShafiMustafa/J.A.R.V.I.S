@@ -3,6 +3,7 @@ dist/
 logs/
 __pycache__/
 *.pyc
+.env
 ._vite_check_out.txt
 ._vite_body.txt
 ._api_check.py

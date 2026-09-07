@@ -20,6 +20,7 @@ class JarvisBrain:
         payload = {
             "model": self.model,
             "stream": True,
+            "keep_alive": "30m",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt}

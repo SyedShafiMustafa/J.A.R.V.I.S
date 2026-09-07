@@ -12,7 +12,7 @@ from pathlib import Path
 
 from config.settings import (
     LLM_PROVIDER,          # "ollama" or "openai"
-    OLLAMA_MODEL,          # from .env, defaults to llama3.1
+    OLLAMA_MODEL,          # from .env, defaults to qwen2.5:3b
     OLLAMA_URL,            # Ollama/Qwen provider endpoint (from .env)
     OPENAI_API_KEY,
     TTS_PROVIDER,
