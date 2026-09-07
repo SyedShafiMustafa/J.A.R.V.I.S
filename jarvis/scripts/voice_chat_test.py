@@ -133,14 +133,24 @@ def transcribe(model, audio):
     return transcript
 
 
-def speak(text, engine):
-    """Speak text aloud using a pre-initialized pyttsx3 engine."""
+def speak(text):
+    """Speak text aloud using a fresh pyttsx3 engine.
+
+    A new engine is created per call because the SAPI5 COM driver
+    silently disconnects after the first runAndWait() on Windows.
+    """
+    import pyttsx3
+
     if not text:
         return
     print("🔊 Speaking...")
     t0 = time.perf_counter()
+    engine = pyttsx3.init()
+    engine.setProperty("rate", 175)
+    engine.setProperty("volume", 1.0)
     engine.say(text)
     engine.runAndWait()
+    engine.stop()
     elapsed = time.perf_counter() - t0
     print(f"🔊 Done speaking. ({elapsed:.2f}s)")
 
@@ -183,18 +193,6 @@ def main():
     model_time = time.perf_counter() - t0
     print(f"⏳ WhisperModel ready. ({model_time:.2f}s)")
 
-    # ------------------------------------------------------------------
-    # Load TTS engine once
-    # ------------------------------------------------------------------
-    import pyttsx3
-
-    print("⏳ Loading TTS engine (one-time)...")
-    t0 = time.perf_counter()
-    tts_engine = pyttsx3.init()
-    tts_engine.setProperty("rate", 175)    # words per minute
-    tts_engine.setProperty("volume", 1.0)  # 0.0 to 1.0
-    tts_time = time.perf_counter() - t0
-    print(f"⏳ TTS engine ready. ({tts_time:.2f}s)\n")
     print("Voice loop active — press Ctrl+C to exit.\n")
 
     # ------------------------------------------------------------------
@@ -230,7 +228,7 @@ def main():
             if response:
                 print(f"\n🤖 JARVIS: {response}\n")
                 # 4. Speak
-                speak(response, tts_engine)
+                speak(response)
             else:
                 print("❌ No response from JARVIS.\n")
                 continue
