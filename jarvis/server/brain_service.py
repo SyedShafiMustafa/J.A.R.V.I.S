@@ -36,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agents.brain import JarvisBrain
@@ -144,6 +144,40 @@ def create_brain_app(brain: JarvisBrain | None = None) -> FastAPI:
         chat = await v1_chat(body)
         return {"choices": [{"message": {"role": "assistant", "content": chat["response"]}}], **chat}
 
+    @app.post("/v1/chat/stream", tags=["brain"])
+    async def v1_chat_stream(body: ChatRequest) -> StreamingResponse:
+        """Stream the brain response as server-sent events (SSE).
+
+        Reuses the existing agents.brain.JarvisBrain.stream() path, which already
+        buffers token chunks into complete sentences. Each event carries one
+        sentence so clients can begin TTS as soon as the first sentence arrives.
+
+        Events:
+            data: {"type": "sentence", "sentence": "...", "model": "..."}
+            data: {"type": "done"}
+            data: {"type": "error", "detail": "..."}
+        """
+        if not body.messages:
+            raise HTTPException(status_code=400, detail="messages must not be empty")
+
+        messages = body.to_list()
+        if not messages:
+            raise HTTPException(status_code=400, detail="no valid messages found")
+
+        prompt = "\n".join(m["content"] for m in messages)
+
+        def event_source():
+            try:
+                for sentence in brain.stream(prompt):
+                    event = json.dumps({"type": "sentence", "sentence": sentence, "model": OLLAMA_MODEL})
+                    yield f"data: {event}\n\n"
+            except Exception as exc:
+                event = json.dumps({"type": "error", "detail": f"brain call failed: {exc}"})
+                yield f"data: {event}\n\n"
+            yield "data: {\"type\": \"done\"}\n\n"
+
+        return StreamingResponse(event_source(), media_type="text/event-stream")
+
     return app
 
 
@@ -164,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     print("  GET  /healthz")
     print("  POST /v1/chat")
     print("  POST /v1/chat/completions")
+    print("  POST /v1/chat/stream (SSE)")
     print(f"  brain model: {OLLAMA_MODEL}")
     print(f"  brain provider url: {OLLAMA_URL}")
 

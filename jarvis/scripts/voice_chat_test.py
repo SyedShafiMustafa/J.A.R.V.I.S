@@ -32,7 +32,7 @@ if sys.platform == "win32":
 # Config
 # ---------------------------------------------------------------------------
 SAMPLE_RATE = 16000   # 16 kHz mono
-CHAT_URL = "http://127.0.0.1:8000/api/v1/chat"
+CHAT_URL = "http://127.0.0.1:8001/v1/chat/stream"
 
 # VAD settings (energy-based)
 SILENCE_THRESHOLD = 0.01   # RMS below this = silence
@@ -155,8 +155,16 @@ def speak(text):
     print(f"🔊 Done speaking. ({elapsed:.2f}s)")
 
 
-def chat(transcript):
-    """Send the transcript to the Dell /api/v1/chat endpoint and return the response."""
+SENTENCE_ENDINGS = (".", "?", "!")
+
+
+def chat_stream(transcript):
+    """Send the transcript to the Lenovo brain streaming endpoint.
+
+    Reads server-sent events and yields complete sentences as soon as they
+    arrive, so the caller can start speaking the first sentence while the
+    brain is still generating the rest.
+    """
     payload = json.dumps({
         "messages": [{"role": "user", "content": transcript}],
     }).encode("utf-8")
@@ -168,17 +176,46 @@ def chat(transcript):
         method="POST",
     )
 
+    pending = ""
+
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            return body.get("response", "")
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if not data:
+                    continue
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                etype = event.get("type")
+                if etype == "error":
+                    print(f"❌ Brain stream error: {event.get('detail', 'unknown')}")
+                    continue
+                if etype == "done":
+                    break
+                if etype == "sentence":
+                    pending += event.get("sentence", "")
+                    # Only hand over complete sentences — never interrupt one halfway.
+                    if pending.endswith(SENTENCE_ENDINGS):
+                        complete = pending.strip()
+                        pending = ""
+                        if complete:
+                            yield complete
+
+        # Flush any remaining text once the stream has finished.
+        if pending.strip():
+            yield pending.strip()
+
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         print(f"❌ HTTP {exc.code}: {detail}")
-        return ""
     except urllib.error.URLError as exc:
         print(f"❌ Connection error: {exc.reason}")
-        return ""
 
 
 def main():
@@ -218,18 +255,23 @@ def main():
                 print("⏭️  No speech detected — skipping.\n")
                 continue
 
-            # 3. Chat
-            print("🧠 Sending to JARVIS...")
+            # 3. Chat (streaming) — speak each sentence as it arrives
+            print("🧠 Sending to JARVIS (streaming)...")
             t0 = time.perf_counter()
-            response = chat(transcript)
+            first_sentence_time = None
+            sentence_count = 0
+            for sentence in chat_stream(transcript):
+                sentence_count += 1
+                if first_sentence_time is None:
+                    first_sentence_time = time.perf_counter() - t0
+                    print(f"   (first sentence in {first_sentence_time:.2f}s)")
+                print(f"\n🤖 JARVIS: {sentence}\n")
+                # 4. Speak immediately — later sentences may still be arriving
+                speak(sentence)
             chat_time = time.perf_counter() - t0
-            print(f"   (chat request: {chat_time:.2f}s)")
+            print(f"   (streaming chat + speech: {chat_time:.2f}s)")
 
-            if response:
-                print(f"\n🤖 JARVIS: {response}\n")
-                # 4. Speak
-                speak(response)
-            else:
+            if sentence_count == 0:
                 print("❌ No response from JARVIS.\n")
                 continue
 
