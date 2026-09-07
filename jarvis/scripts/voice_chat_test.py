@@ -9,6 +9,7 @@ Flow:
 """
 
 import sys
+import time
 import json
 import urllib.request
 import urllib.error
@@ -27,6 +28,7 @@ def record_audio():
     import sounddevice as sd
 
     print(f"🎤 Recording for {DURATION} seconds — speak now...")
+    t0 = time.perf_counter()
     audio = sd.rec(
         int(DURATION * SAMPLE_RATE),
         samplerate=SAMPLE_RATE,
@@ -34,7 +36,8 @@ def record_audio():
         dtype="float32",
     )
     sd.wait()
-    print("🎤 Recording complete.\n")
+    elapsed = time.perf_counter() - t0
+    print(f"🎤 Recording complete. ({elapsed:.2f}s)\n")
     return audio.flatten()
 
 
@@ -43,12 +46,18 @@ def transcribe(audio):
     from faster_whisper import WhisperModel
 
     print("⏳ Loading Whisper model...")
+    t0 = time.perf_counter()
     model = WhisperModel("tiny", device="cpu", compute_type="int8")
+    model_time = time.perf_counter() - t0
+    print(f"⏳ WhisperModel loaded. ({model_time:.2f}s)")
 
     print("⏳ Transcribing...")
+    t0 = time.perf_counter()
     segments, info = model.transcribe(audio, language="en")
     text_parts = [seg.text.strip() for seg in segments if seg.text.strip()]
     transcript = " ".join(text_parts) if text_parts else ""
+    transcribe_time = time.perf_counter() - t0
+    print(f"⏳ Transcription complete. ({transcribe_time:.2f}s)")
 
     print(f"🗣️  You said: \"{transcript}\"")
     print(f"   (detected language: {info.language}, probability: {info.language_probability:.2f})\n")
@@ -82,6 +91,8 @@ def chat(transcript):
 
 
 def main():
+    t_start = time.perf_counter()
+
     # 1. Record
     audio = record_audio()
     if np.max(np.abs(audio)) < 0.01:
@@ -95,12 +106,19 @@ def main():
 
     # 3. Chat
     print("🧠 Sending to JARVIS...")
+    t0 = time.perf_counter()
     response = chat(transcript)
+    chat_time = time.perf_counter() - t0
+    print(f"   (chat request: {chat_time:.2f}s)")
+
     if response:
         print(f"\n🤖 JARVIS: {response}\n")
     else:
         print("❌ No response from JARVIS.")
         sys.exit(1)
+
+    total = time.perf_counter() - t_start
+    print(f"⏱️  Total: {total:.2f}s")
 
 
 if __name__ == "__main__":
