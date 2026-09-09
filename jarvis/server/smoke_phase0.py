@@ -219,6 +219,10 @@ def test_endpoints() -> None:
         data = json.loads(body)
         ok("/openapi.json documents the API", status == 200 and data.get("openapi"))
 
+        # Test /docs endpoint returns HTML
+        status, body = _http_get(f"{base}/docs")
+        ok("/docs -> 200 + HTML", status == 200 and b"<html" in body.lower())
+
         status, _ = _http_get(f"{base}/does-not-exist")
         ok("unknown route -> honest 404", status == 404, f"got {status}")
 

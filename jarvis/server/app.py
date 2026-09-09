@@ -60,11 +60,19 @@ def create_app(config=None):
     (None -> load_config() from the environment)."""
     # Imported lazily so the rest of the package (config/db/logging) stays
     # importable and testable on machines without FastAPI installed.
+    # Phase 1 routers are optional — Phase 0 must work without them.
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
-    from .api_v1 import router as api_v1_router
-    from .chat_v1 import router as chat_router
+
+    try:
+        from .api_v1 import router as api_v1_router
+    except Exception:
+        api_v1_router = None
+    try:
+        from .chat_v1 import router as chat_router
+    except Exception:
+        chat_router = None
 
     cfg = config if config is not None else load_config()
 
@@ -132,7 +140,9 @@ def create_app(config=None):
         }
         return JSONResponse(payload, status_code=200 if database else 503)
 
-    app.include_router(api_v1_router)
-    app.include_router(chat_router)
+    if api_v1_router is not None:
+        app.include_router(api_v1_router)
+    if chat_router is not None:
+        app.include_router(chat_router)
 
     return app
