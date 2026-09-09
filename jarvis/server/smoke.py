@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import unittest.mock
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -214,7 +215,7 @@ def test_endpoints() -> None:
 
         status, body = _http_get(f"{base}/readyz")
         data = json.loads(body)
-        ok("/readyz -> 200 + database ok", status == 200 and data.get("checks", {}).get("database") == "ok")
+        ok("/readyz -> 200 + database ok", status == 200 and data.get("checks", {}).get("database") == "ok" and data.get("status") == "ready")
 
         status, body = _http_get(f"{base}/")
         data = json.loads(body)
@@ -229,6 +230,15 @@ def test_endpoints() -> None:
 
         ready, _ = _http_get(f"{base}/readyz")
         ok("readiness still green after traffic", ready == 200)
+
+        # Test /readyz returns 503 when database check fails (mocked)
+        with unittest.mock.patch("server.app.db_ok", return_value=False):
+            status, body = _http_get(f"{base}/readyz")
+            data = json.loads(body)
+            ok("/readyz -> 503 when db_ok returns False", status == 503)
+            ok("/readyz payload shows database error", data.get("checks", {}).get("database") == "error")
+            ok("/readyz payload status is degraded", data.get("status") == "degraded")
+            ok("/readyz payload has no brain field", "brain" not in data.get("checks", {}))
 
     server.should_exit = True
     thread.join(timeout=10)

@@ -8,7 +8,7 @@ contract (config, logging, database, honest status codes) that every later
 phase builds on:
 
     GET /healthz   liveness  — the process is up (always 200)
-    GET /readyz    readiness — can we actually serve (db probe + brain probe)
+    GET /readyz    readiness — database probe only (503 when broken)
     GET /          service identity + phase map
     GET /docs      FastAPI's interactive API documentation
 
@@ -123,28 +123,16 @@ def create_app(config=None):
     @app.get("/readyz", tags=["meta"])
     def readyz():
         database = db_ok(cfg)
-        brain_ok = _brain_probe(cfg)
         payload = {
-            "status": "ready" if (database and brain_ok) else "degraded",
+            "status": "ready" if database else "degraded",
             "checks": {
                 "database": "ok" if database else "error",
-                "brain": "ok" if brain_ok else "unavailable",
             },
             "ts": now_iso(),
         }
-        return JSONResponse(payload, status_code=200 if (database and brain_ok) else 503)
+        return JSONResponse(payload, status_code=200 if database else 503)
 
     app.include_router(api_v1_router)
     app.include_router(chat_router)
 
     return app
-
-
-def _brain_probe(cfg) -> bool:
-    """Best-effort brain reachability probe used by /readyz."""
-    import server.brain as _bp
-
-    try:
-        return bool(_bp.BrainClient(cfg).is_healthy())
-    except Exception:
-        return False
