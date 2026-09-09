@@ -9,7 +9,7 @@ from config.config import PIPER_MODEL
 
 class TextToSpeech:
     def __init__(self):
-        print("🔊 Loading Piper voice...")
+        print("[TTS] Loading Piper voice...")
 
         self.voice = PiperVoice.load(str(PIPER_MODEL))
         self.sample_rate = 22050

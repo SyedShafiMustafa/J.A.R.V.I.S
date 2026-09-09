@@ -112,10 +112,9 @@ class LiveAudioProvider:
         self.tts.stop()
 
     def _on_wake_detected(self) -> None:
-        raise NotImplementedError(
-            "LiveAudioProvider does not run the conversation directly. "
-            "Wake detection should hand off to the orchestrator layer."
-        )
+        # Emit wake event so the voice loop can start a conversation
+        from backend.bus import wake_detected
+        self.bus.publish(wake_detected(session_id=self._session_id))
 
 
 # ---------------------------------------------------------------------------

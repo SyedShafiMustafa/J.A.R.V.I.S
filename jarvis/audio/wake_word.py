@@ -18,12 +18,12 @@ class WakeWordDetector:
         try:
             self.on_detect()
         except Exception as e:
-            print(f"❌ Conversation error: {e}")
+            print(f"[WAKE] Conversation error: {e}")
         finally:
             self.busy = False
 
     def start(self):
-        print("🎙 Listening for 'Hey Jarvis'...")
+        print("[WAKE] Listening for 'Hey Jarvis'...")
 
         def callback(indata, frames, time, status):
             audio = (indata[:, 0] * 32767).astype(np.int16)
@@ -34,7 +34,7 @@ class WakeWordDetector:
             if score > 0.5 and not self.triggered and not self.busy:
                 self.triggered = True
                 self.busy = True
-                print("✅ Wake word detected!")
+                print("[WAKE] Wake word detected!")
 
                 # Run the conversation on its own thread — never block
                 # the audio callback (that causes buffer overflows).

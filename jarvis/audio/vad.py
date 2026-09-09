@@ -14,7 +14,7 @@ class VoiceRecorder:
 
     def record(self):
 
-        print("🎤 Speak...")
+        print("[VAD] Speak...")
 
         q = queue.Queue()
 

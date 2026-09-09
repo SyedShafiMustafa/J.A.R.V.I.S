@@ -466,8 +466,18 @@ class JarvisBackendService:
         try:
             runtime = self._get_runtime()
             bus = runtime["bus"]
+            audio = runtime["audio"]
             self._attach_bus_bridge(bus)
-            self._voice_conversation(runtime)
+
+            # Start wake word detection in a background thread
+            self._wake_thread = threading.Thread(
+                target=audio.start_wake_word,
+                daemon=True,
+            )
+            self._wake_thread.start()
+
+            # Wait for wake events and run conversations
+            self._wait_for_wake_and_converse(runtime)
         except RuntimeUnavailableError as exc:
             _log.error("voice loop unavailable: %s", exc)
             self.state.set_error(str(exc))
@@ -477,11 +487,55 @@ class JarvisBackendService:
             self.state.set_error(str(exc))
             self.emit({"type": "error", "message": str(exc)})
         finally:
+            # Clean up wake word detection
+            try:
+                runtime = self._get_runtime()
+                runtime["audio"].stop_wake_word()
+            except Exception:
+                pass
             self._voice_mode = False
             self._voice_future = None
             self._voice_thread = None
+            self._wake_thread = None
             self.state.set_status(STATUS_IDLE)
             self.emit({"type": "status", "status": STATUS_IDLE})
+
+    def _wait_for_wake_and_converse(self, runtime: dict[str, Any]) -> None:
+        """Wait for wake word, then run conversation, then repeat."""
+        bus = runtime["bus"]
+        audio = runtime["audio"]
+        lifecycle = runtime["lifecycle"]
+
+        # Subscribe to wake events
+        wake_event = threading.Event()
+
+        def on_wake(event):
+            wake_event.set()
+
+        bus.subscribe(on_wake)
+
+        try:
+            while self._voice_mode and not self._voice_future.is_set():
+                wake_event.clear()
+                self.state.set_status(STATUS_LISTENING)
+                self.emit({"type": "status", "status": STATUS_LISTENING})
+
+                # Wait for wake word (with timeout to check voice_mode)
+                while self._voice_mode and not self._voice_future.is_set():
+                    if wake_event.wait(timeout=1.0):
+                        break
+
+                if not self._voice_mode or self._voice_future.is_set():
+                    return
+
+                # Wake detected - run conversation
+                self._voice_conversation(runtime)
+
+                # Conversation ended - go back to listening
+                if lifecycle.shutdown_requested:
+                    return
+        finally:
+            bus.unsubscribe(on_wake)
 
     def _voice_conversation(self, runtime: dict[str, Any]) -> None:
         audio = runtime["audio"]

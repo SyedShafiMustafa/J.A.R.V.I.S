@@ -81,6 +81,9 @@ def build_live_runtime(
         memory = Memory()
         router = CommandRouter()
 
+        # Warm up models to avoid cold-loading delays during first conversation
+        _warm_up_models(audio, brain)
+
         return {
             "bus": runtime_bus,
             "session": session,
@@ -99,6 +102,34 @@ def build_live_runtime(
         raise RuntimeUnavailableError(
             f"live runtime construction failed: {exc}"
         ) from exc
+
+
+def _warm_up_models(audio, brain):
+    """Pre-load models to avoid cold-start latency on first conversation."""
+    import logging
+    _log = logging.getLogger("jarvis.runtime")
+
+    # Warm up Whisper (STT)
+    try:
+        _log.info("Warming up Whisper STT...")
+        audio.stt.transcribe("")  # No-op to trigger model load
+    except Exception:
+        pass  # Empty audio may fail, but model is loaded
+
+    # Warm up Piper TTS
+    try:
+        _log.info("Warming up Piper TTS...")
+        audio.tts.speak(" ")
+        audio.tts.wait()
+    except Exception:
+        pass
+
+    # Warm up Ollama connection
+    try:
+        _log.info("Warming up Ollama connection...")
+        list(brain.stream("Hello"))  # Trigger connection
+    except Exception:
+        pass
 
 
 # Convenience alias so callers can inject a fake builder in tests.

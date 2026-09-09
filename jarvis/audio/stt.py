@@ -6,7 +6,7 @@ from config.config import WHISPER_MODEL
 class SpeechToText:
 
     def __init__(self):
-        print(f"🧠 Loading Faster-Whisper {WHISPER_MODEL}...")
+        print(f"[STT] Loading Faster-Whisper {WHISPER_MODEL}...")
 
         self.model = WhisperModel(
             WHISPER_MODEL,
