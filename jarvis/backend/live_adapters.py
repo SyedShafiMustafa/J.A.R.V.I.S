@@ -30,6 +30,7 @@ from backend.bus import (
     tool_started,
     tool_finished,
     tool_failed,
+    user_interrupt,
 )
 from backend.interfaces import (
     OrchestratorDecision,
@@ -71,6 +72,9 @@ class LiveAudioProvider:
         self.tts = TextToSpeech()
         self._wake_detector = None
         self._session_id = session_id
+        self._speaking = False
+        self._barge_in_thread = None
+        self._barge_in_stop = threading.Event()
 
     def start_wake_word(self) -> None:
         if self._wake_detector is not None:
@@ -103,13 +107,72 @@ class LiveAudioProvider:
         return self.stt.transcribe(audio_path)
 
     def speak(self, text: str) -> None:
+        self._speaking = True
+        self._barge_in_stop.clear()
+        self._barge_in_thread = threading.Thread(
+            target=self._barge_in_listener,
+            daemon=True,
+        )
+        self._barge_in_thread.start()
         self.tts.speak(text)
 
     def wait(self) -> None:
+        self._speaking = False
+        self._barge_in_stop.set()
+        if self._barge_in_thread and self._barge_in_thread.is_alive():
+            self._barge_in_thread.join(timeout=1.0)
         self.tts.wait()
+        self._speaking = False
 
     def stop_speaking(self) -> None:
-        self.tts.stop()
+        self._speaking = False
+        self._barge_in_stop.set()
+        if self._barge_in_thread and self._barge_in_thread.is_alive():
+            self._barge_in_thread.join(timeout=1.0)
+        self.tts.stop_speaking()
+
+    def _barge_in_listener(self) -> None:
+        """Background VAD that listens for user speech while TTS is playing."""
+        import sounddevice as sd
+        import numpy as np
+        import queue
+
+        q = queue.Queue()
+
+        def callback(indata, frames, time, status):
+            q.put(indata.copy())
+
+        silence_threshold = 0.01
+        started = False
+        silence_count = 0
+
+        with sd.InputStream(
+            samplerate=16000,
+            channels=1,
+            dtype="float32",
+            callback=callback,
+        ):
+            while self._speaking and not self._barge_in_stop.is_set():
+                try:
+                    data = q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+
+                audio = data.flatten()
+                volume = np.abs(audio).mean()
+
+                if volume > silence_threshold:
+                    started = True
+                    silence_count = 0
+                elif started:
+                    silence_count += 1
+                    if silence_count > 5:  # ~0.5s silence
+                        # Speech detected - trigger interrupt
+                        if self._speaking:
+                            self.bus.publish(user_interrupt(session_id=self._session_id))
+                            self._speaking = False
+                            self.stop_speaking()
+                        break
 
     def _on_wake_detected(self) -> None:
         # Emit wake event so the voice loop can start a conversation

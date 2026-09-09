@@ -537,6 +537,31 @@ class JarvisBackendService:
         finally:
             bus.unsubscribe(on_wake)
 
+    def _speak(self, audio: Any, text: str) -> None:
+        self.state.set_status(STATUS_SPEAKING)
+        self.emit({"type": "status", "status": STATUS_SPEAKING})
+        self.emit({"type": "reply", "text": text})
+        self.state.set_reply(text)
+        try:
+            audio.speak(text)
+            audio.wait()
+        except Exception as exc:
+            _log.exception("speak failed")
+            self.state.set_error(f"speak failed: {exc}")
+            self.emit({"type": "error", "message": f"speak failed: {exc}"})
+        finally:
+            if self.state.status not in {STATUS_ERROR}:
+                self.state.set_status(STATUS_IDLE)
+                self.emit({"type": "status", "status": STATUS_IDLE})
+
+    def _on_user_interrupt(self, event: Any) -> None:
+        """Handle user interrupt during TTS playback."""
+        if self.state.status == STATUS_SPEAKING:
+            _log.info("User interrupt detected during TTS")
+            self.state.set_status(STATUS_LISTENING)
+            self.emit({"type": "status", "status": STATUS_LISTENING})
+            self.emit({"type": "interrupt", "message": "User interrupted"})
+
     def _voice_conversation(self, runtime: dict[str, Any]) -> None:
         audio = runtime["audio"]
         session = runtime["session"]
@@ -546,65 +571,74 @@ class JarvisBackendService:
 
         self.state.note_session(session.id)
 
-        wake = random.choice(WAKE_RESPONSES)
-        self.state.note_wake_response(wake)
-        self._speak(audio, wake)
+        # Subscribe to user interrupt events
+        def on_interrupt(event):
+            self._on_user_interrupt(event)
 
-        if lifecycle.shutdown_requested:
-            return
+        bus.subscribe(on_interrupt)
 
-        timeout = time.time() + 30
-
-        while time.time() < timeout:
-            if self._voice_future is not None and self._voice_future.is_set():
-                return
-
-            try:
-                audio_path = audio.record_audio()
-            except Exception as exc:
-                _log.exception("record failed")
-                self.state.set_error(f"record failed: {exc}")
-                self.emit({"type": "error", "message": f"record failed: {exc}"})
-                return
-
-            user = (audio.transcribe(audio_path) or "").strip()
-
-            if not user:
-                continue
-
-            self.state.set_transcript(user)
-            self.emit({"type": "user_text", "text": user})
-            bus.publish(transcription_ready(session_id=session.id, user_text=user))
-
-            if _is_shutdown_phrase(user):
-                reply = "Shutting down. Goodbye, Shafi."
-                self._speak(audio, reply)
-                lifecycle.request_shutdown()
-                lifecycle.shutdown()
-                return
-
-            if _is_sleep_phrase(user):
-                reply = "Going back to sleep."
-                self._speak(audio, reply)
-                lifecycle.request_shutdown()
-                return
+        try:
+            wake = random.choice(WAKE_RESPONSES)
+            self.state.note_wake_response(wake)
+            self._speak(audio, wake)
 
             if lifecycle.shutdown_requested:
-                bus.publish(user_interrupt(session_id=session.id))
                 return
 
-            session.note_user(user)
-            decision = orchestrator.decide(user)
-            session.note_decision(decision.metadata or {})
-
-            if decision.kind == "reply":
-                self._speak(audio, decision.reply or "")
-            elif decision.kind == "action":
-                self._run_action(runtime, user)
-            else:
-                self._run_chat(runtime, user)
-
             timeout = time.time() + 30
+
+            while time.time() < timeout:
+                if self._voice_future is not None and self._voice_future.is_set():
+                    return
+
+                try:
+                    audio_path = audio.record_audio()
+                except Exception as exc:
+                    _log.exception("record failed")
+                    self.state.set_error(f"record failed: {exc}")
+                    self.emit({"type": "error", "message": f"record failed: {exc}"})
+                    return
+
+                user = (audio.transcribe(audio_path) or "").strip()
+
+                if not user:
+                    continue
+
+                self.state.set_transcript(user)
+                self.emit({"type": "user_text", "text": user})
+                bus.publish(transcription_ready(session_id=session.id, user_text=user))
+
+                if _is_shutdown_phrase(user):
+                    reply = "Shutting down. Goodbye, Shafi."
+                    self._speak(audio, reply)
+                    lifecycle.request_shutdown()
+                    lifecycle.shutdown()
+                    return
+
+                if _is_sleep_phrase(user):
+                    reply = "Going back to sleep."
+                    self._speak(audio, reply)
+                    lifecycle.request_shutdown()
+                    return
+
+                if lifecycle.shutdown_requested:
+                    bus.publish(user_interrupt(session_id=session.id))
+                    return
+
+                session.note_user(user)
+                decision = orchestrator.decide(user)
+                session.note_decision(decision.metadata or {})
+
+                if decision.kind == "reply":
+                    self._speak(audio, decision.reply or "")
+                elif decision.kind == "action":
+                    self._run_action(runtime, user)
+                else:
+                    self._run_chat(runtime, user)
+
+                timeout = time.time() + 30
+        finally:
+            bus.unsubscribe(on_interrupt)
 
     # ------------------------------------------------------------------
     # bus -> websocket bridge
