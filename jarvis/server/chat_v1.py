@@ -14,6 +14,7 @@ This is intentionally small and backend-neutral:
 - no new LLM implementation
 - no auth/pairing/memory/voice/telephony/HUD added here
 - uses the existing JARVIS_BRAIN_URL config and BrainClient contract
+It is protected by the same authentication as other /api/v1 endpoints.
 """
 
 from __future__ import annotations
@@ -21,16 +22,25 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import Depends
 
 from server.brain import BrainAuthError, BrainBadResponse, BrainClient, BrainError, BrainUnavailable, BrainTimeout
 from server.config import ServerConfig
+from server.auth import single_auth, bearer_depends, header_token_dep
 
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
 
+async def _auth(request: Request) -> str:
+    return await single_auth(bearer_depends, header_token_dep)(request)
+
+
 @router.post("/chat", status_code=status.HTTP_200_OK, response_model=None)
-async def chat_proxy(request: Request) -> dict:
+async def chat_proxy(
+    request: Request,
+    token: Annotated[str, Depends(_auth)],
+) -> dict:
     """Forward a chat request to the configured Lenovo brain and return its response.
 
     Expected request body:

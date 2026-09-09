@@ -33,7 +33,6 @@ from server.auth import (
     AuthError,
     bearer_depends,
     header_token_dep,
-    query_token_dep,
     single_auth,
 )
 from server.brain import BrainAuthError, BrainBadResponse, BrainClient, BrainError, BrainTimeout, BrainUnavailable
@@ -48,7 +47,7 @@ router = APIRouter(prefix="/api/v1", tags=["v1"])
 
 
 async def _auth(request: Request) -> str:
-    return await single_auth(bearer_depends, header_token_dep, query_token_dep)()
+    return await single_auth(bearer_depends, header_token_dep)(request)
 
 
 # ------------------------------------------------------------------ #
@@ -293,7 +292,7 @@ async def inbox_ws(websocket: WebSocket) -> None:
         4. receive status + reply events
         5. send {"type": "message", "message": "...", "device_id": "..."}
 
-    Authentication for WebSockets is handled on connect via query/header
+    Authentication for WebSockets is handled on connect via header
     because WebSocket upgrades do not reliably carry Authorization headers
     across all clients.
     """
@@ -433,20 +432,21 @@ async def inbox_ws(websocket: WebSocket) -> None:
 
 
 def _ws_auth(websocket: WebSocket) -> str | None:
-    token = websocket.query_params.get("token", "")
-    if token:
-        try:
-            from server.auth import validate_token
-            return validate_token(websocket.app.state.config, None, query=token)
-        except AuthError:
-            return None
-
     headers = dict(websocket.headers)
     auth = headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         try:
             from server.auth import validate_token
             return validate_token(websocket.app.state.config, None, header=auth.split(" ", 1)[1])
+        except AuthError:
+            return None
+
+    # Check X-Jarvis-Token header
+    x_token = headers.get("x-jarvis-token", "")
+    if x_token:
+        try:
+            from server.auth import validate_token
+            return validate_token(websocket.app.state.config, None, header=x_token)
         except AuthError:
             return None
 

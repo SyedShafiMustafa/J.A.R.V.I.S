@@ -69,6 +69,26 @@ def _http_get(url: str, timeout: float = 5.0):
         return err.code, err.read()
 
 
+def _http_get_with_headers(url: str, headers: dict, timeout: float = 5.0):
+    """GET url with custom headers -> (status_code, body_bytes)."""
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, err.read()
+
+
+def _http_post_with_headers(url: str, data: bytes, headers: dict, timeout: float = 5.0):
+    """POST url with custom headers -> (status_code, body_bytes)."""
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as err:
+        return err.code, err.read()
+
+
 TMP = Path(tempfile.mkdtemp(prefix="jarvis_server_smoke_"))
 
 
@@ -243,6 +263,47 @@ def test_endpoints() -> None:
             ok("/readyz payload shows database error", data.get("checks", {}).get("database") == "error")
             ok("/readyz payload status is degraded", data.get("status") == "degraded")
             ok("/readyz payload has no brain field", "brain" not in data.get("checks", {}))
+
+        # ---- Auth tests ----
+        # Test that query token auth fails (no longer supported)
+        def _http_post_with_headers(url: str, data: bytes, headers: dict, timeout: float = 5.0):
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    return resp.status, resp.read()
+            except urllib.error.HTTPError as err:
+                return err.code, err.read()
+
+        # Use the dev-token for testing (development mode)
+        dev_token = "dev-token"
+
+        # 1. Query token should fail (401)
+        status, _ = _http_get(f"{base}/api/v1/devices?token={dev_token}")
+        ok("query token auth fails on /api/v1/devices", status == 401, f"got {status}")
+
+        # 2. Bearer token should succeed
+        status, body = _http_get(f"{base}/api/v1/devices", timeout=5.0)
+        ok("unauthed request to /api/v1/devices fails", status == 401)
+
+        headers = {"Authorization": f"Bearer {dev_token}"}
+        status, body = _http_get_with_headers(f"{base}/api/v1/devices", headers)
+        ok("Bearer token auth succeeds on /api/v1/devices", status == 200, f"got {status}")
+
+        # 3. X-Jarvis-Token header should succeed
+        headers = {"X-Jarvis-Token": dev_token}
+        status, body = _http_get_with_headers(f"{base}/api/v1/devices", headers)
+        ok("X-Jarvis-Token auth succeeds on /api/v1/devices", status == 200, f"got {status}")
+
+        # 4. /api/v1/chat should require auth
+        chat_data = json.dumps({"messages": [{"role": "user", "content": "test"}]}).encode()
+        status, _ = _http_post_with_headers(f"{base}/api/v1/chat", chat_data, {"Content-Type": "application/json"})
+        ok("unauthed /api/v1/chat fails", status == 401, f"got {status}")
+
+        status, _ = _http_post_with_headers(f"{base}/api/v1/chat", chat_data, {"Content-Type": "application/json", "Authorization": f"Bearer {dev_token}"})
+        ok("Bearer authed /api/v1/chat succeeds (or 503 if brain down)", status in (200, 503), f"got {status}")
+
+        status, _ = _http_post_with_headers(f"{base}/api/v1/chat", chat_data, {"Content-Type": "application/json", "X-Jarvis-Token": dev_token})
+        ok("X-Jarvis-Token authed /api/v1/chat succeeds (or 503 if brain down)", status in (200, 503), f"got {status}")
 
     server.should_exit = True
     thread.join(timeout=10)

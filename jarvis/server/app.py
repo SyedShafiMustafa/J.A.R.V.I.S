@@ -32,6 +32,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from . import __version__
+from .auth import AuthError
 from .config import load_config
 from .db import db_ok, ensure_db
 from .logging_setup import get_logger, setup_logging
@@ -94,6 +95,13 @@ def create_app(config=None):
         lifespan=lifespan,
     )
     app.state.config = cfg
+
+    @app.exception_handler(AuthError)
+    async def auth_error_handler(request, exc: AuthError):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": str(exc)},
+        )
 
     app.add_middleware(
         CORSMiddleware,

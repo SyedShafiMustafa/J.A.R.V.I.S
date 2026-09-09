@@ -19,10 +19,11 @@ stays easy to reason about and the auth policy can be switched out later.
 
 from __future__ import annotations
 
-from typing import Annotated, Awaitable, Callable
+import inspect
+from typing import Annotated, Awaitable, Callable, Union
 
 from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPAuthorizationCredentials
 
 from server.config import ServerConfig
 
@@ -35,7 +36,6 @@ def validate_token(
     cfg: ServerConfig,
     bearer: HTTPAuthorizationCredentials | None,
     header: str | None = None,
-    query: str | None = None,
 ) -> str:
     """Validate a bearer token and return the token value on success.
 
@@ -47,8 +47,6 @@ def validate_token(
         token = bearer.credentials
     elif header:
         token = header
-    elif query:
-        token = query
 
     token = token or ""
 
@@ -82,14 +80,16 @@ def require_auth(request: Request) -> str:
 # --------------------------------------------------------------------------- #
 
 
-http_bearer = HTTPBearer(auto_error=False)
-
-
-async def bearer_depends(request: Request, creds: Annotated[HTTPAuthorizationCredentials | None, Depends(http_bearer)] = None) -> str:
+async def bearer_depends(request: Request) -> str:
     """FastAPI dependency: authenticate via Authorization: Bearer <token>."""
-    request.state._auth_bearer = creds
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        creds = auth_header.split(" ", 1)[1]
+        request.state._auth_bearer = HTTPAuthorizationCredentials(scheme="Bearer", credentials=creds)
+    else:
+        request.state._auth_bearer = None
     cfg = request.app.state.config
-    return validate_token(cfg, creds)
+    return validate_token(cfg, request.state._auth_bearer)
 
 
 # --------------------------------------------------------------------------- #
@@ -104,29 +104,21 @@ def header_token_dep(request: Request) -> str:
     return validate_token(cfg, None, header=token)
 
 
-def query_token_dep(request: Request) -> str:
-    """Auth via ?token= query param. Convenience for simple GETs / webhooks."""
-    cfg = request.app.state.config
-    token = request.query_params.get("token", "")
-    return validate_token(cfg, None, query=token)
-
-
-# --------------------------------------------------------------------------- #
-# Conflict guard: only one auth dependency per call
-# --------------------------------------------------------------------------- #
-
-
-def single_auth(*deps: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
+def single_auth(*deps: Callable[..., Union[str, Awaitable[str]]]) -> Callable[..., Awaitable[str]]:
     """Pick the first dependency that returns a token; fall back through them.
 
     Keeps the router readable: you can say
-        auth: str = Depends(single_auth(bearer_depends, header_token_dep, query_token_dep))
+        auth: str = Depends(single_auth(bearer_depends, header_token_dep))
     without wiring body/type logic in every endpoint.
     """
-    async def _pick() -> str:
+    async def _pick(request: Request) -> str:
         for dep in deps:
             try:
-                value = await dep()
+                result = dep(request)
+                if inspect.iscoroutine(result):
+                    value = await result
+                else:
+                    value = result
                 if value:
                     return value
             except AuthError:
