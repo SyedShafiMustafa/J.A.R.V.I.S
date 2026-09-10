@@ -229,6 +229,69 @@ class Memory:
                 for row in rows
             ]
 
+    # --- Context Window Engine ---
+
+    def get_recent_messages(self, conversation_id: str, limit: int = 15) -> list[dict]:
+        """
+        Get the most recent messages for a conversation.
+        Returns messages in chronological order (oldest first).
+        """
+        with self.lock:
+            rows = self.cursor.execute(
+                """
+                SELECT id, conversation_id, role, content, created_at, metadata
+                FROM messages
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (conversation_id, limit)
+            ).fetchall()
+            # Reverse to get chronological order (oldest first)
+            rows.reverse()
+            return [
+                {
+                    "id": row[0],
+                    "conversation_id": row[1],
+                    "role": row[2],
+                    "content": row[3],
+                    "created_at": row[4],
+                    "metadata": json.loads(row[5]) if row[5] else {},
+                }
+                for row in rows
+            ]
+
+    def build_context(
+        self,
+        conversation_id: str,
+        current_message: str,
+        system_prompt: str = "You are JARVIS, a fast desktop AI assistant.\nReply naturally in 1-2 sentences unless asked otherwise.",
+        max_turns: int = 15,
+    ) -> list[dict]:
+        """
+        Build the full context for LLM request.
+        Returns a list of message dicts in the format expected by the LLM API.
+        """
+        # Get recent messages (up to max_turns * 2 messages = max_turns turns)
+        recent_messages = self.get_recent_messages(conversation_id, limit=max_turns * 2)
+
+        # Build messages list
+        messages = [
+            {"role": "system", "content": system_prompt},
+        ]
+
+        # Add recent conversation history
+        for msg in recent_messages:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"],
+            })
+
+        # Add current user message
+        messages.append({"role": "user", "content": current_message})
+
+        return messages
+
     # --- Existing memory methods ---
 
     def save_memory(self, user_message, assistant_message):

@@ -135,7 +135,7 @@ def _warm_up_models(audio, brain):
     # Warm up Ollama connection
     try:
         _log.info("Warming up Ollama connection...")
-        list(brain.stream("Hello"))  # Trigger connection
+        list(brain.stream([{"role": "user", "content": "Hello"}]))  # Trigger connection
     except Exception:
         pass
 

@@ -444,11 +444,14 @@ class JarvisBackendService:
         if conversation_id:
             memory.save_message(conversation_id, "user", text)
 
-        memories = memory.search_memories(text)
-        context = f"Relevant memories:\n{memories}\n\nUser: {text}" if memories else text
+        # Build context with conversation history
+        messages = memory.build_context(conversation_id, text) if conversation_id else [
+            {"role": "system", "content": "You are JARVIS, a fast desktop AI assistant.\nReply naturally in 1-2 sentences unless asked otherwise."},
+            {"role": "user", "content": text},
+        ]
 
         full_reply = ""
-        for sentence in brain.stream(context):
+        for sentence in brain.stream(messages):
             full_reply += sentence + " "
             self._speak(audio, sentence)
 

@@ -3,11 +3,6 @@ import requests
 
 from config.config import OLLAMA_URL, OLLAMA_MODEL
 
-SYSTEM_PROMPT = """
-You are JARVIS, a fast desktop AI assistant.
-Reply naturally in 1-2 sentences unless asked otherwise.
-"""
-
 
 class JarvisBrain:
 
@@ -15,16 +10,13 @@ class JarvisBrain:
         self.url = OLLAMA_URL
         self.model = OLLAMA_MODEL
 
-    def stream(self, prompt: str):
+    def stream(self, messages: list[dict]):
 
         payload = {
             "model": self.model,
             "stream": True,
             "keep_alive": "30m",
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
+            "messages": messages,
             "options": {
                 "temperature": 0.3,
                 "num_predict": 150,
@@ -80,5 +72,5 @@ class JarvisBrain:
         if buffer.strip():
             yield buffer.strip()
 
-    def ask(self, prompt: str):
-        return " ".join(self.stream(prompt))
+    def ask(self, messages: list[dict]):
+        return " ".join(self.stream(messages))

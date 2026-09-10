@@ -27,6 +27,8 @@ from __future__ import annotations
 import json
 import sys
 import time
+import tempfile
+import os
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -1120,6 +1122,83 @@ def test_tool_runner_safety() -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Context Window Engine
+# ---------------------------------------------------------------------------
+
+def test_context_window() -> None:
+    start_section("context window engine")
+
+    from core.memory import Memory
+
+    # Use a temp database
+    import tempfile
+    import os
+    temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    temp_db.close()
+
+    original_db_path = os.environ.get("MEMORY_DB_PATH")
+    os.environ["MEMORY_DB_PATH"] = temp_db.name
+
+    try:
+        mem = Memory()
+
+        # Create a test conversation
+        conv_id = mem.create_conversation()
+
+        # Test 1: Empty conversation returns system prompt + current message
+        messages = mem.build_context(conv_id, "Hello")
+        ok("empty conversation: returns system + user", len(messages) == 2)
+        ok("empty conversation: first is system", messages[0]["role"] == "system")
+        ok("empty conversation: last is user", messages[-1]["role"] == "user")
+        ok("empty conversation: current message last", messages[-1]["content"] == "Hello")
+
+        # Test 2: Add some messages and verify ordering
+        mem.save_message(conv_id, "user", "First")
+        mem.save_message(conv_id, "assistant", "Hi there")
+        mem.save_message(conv_id, "user", "Second")
+        mem.save_message(conv_id, "assistant", "Hello again")
+        mem.save_message(conv_id, "user", "Third")
+
+        messages = mem.build_context(conv_id, "Current")
+        # Should have: system + 5 history + current = 7 messages
+        ok("with history: correct count", len(messages) == 7)
+        ok("with history: first is system", messages[0]["role"] == "system")
+        ok("with history: messages in order", messages[1]["content"] == "First")
+        ok("with history: last is current user", messages[-1]["content"] == "Current")
+
+        # Test 3: Limit of 15 turns
+        # Add 10 more turns (20 messages)
+        for i in range(10):
+            mem.save_message(conv_id, "user", f"User {i}")
+            mem.save_message(conv_id, "assistant", f"Assistant {i}")
+
+        # Total: 2.5 + 10 = 12.5 turns = 25 messages
+        # With max_turns=15, we keep all 25 + system + current = 27
+        messages = mem.build_context(conv_id, "New message", max_turns=15)
+        ok("limit enforced: correct count", len(messages) == 27)
+        ok("limit enforced: first is system", messages[0]["role"] == "system")
+        ok("limit enforced: last is current user", messages[-1]["content"] == "New message")
+        # Oldest should be "First" since we keep all 12.5 turns (under 15 limit)
+        ok("limit enforced: oldest is First", messages[1]["content"] == "First")
+
+        # Test 4: get_recent_messages ordering
+        recent = mem.get_recent_messages(conv_id, limit=4)
+        ok("get_recent_messages: correct count", len(recent) == 4)
+        ok("get_recent_messages: chronological order", recent[0]["content"] == "User 8")
+        ok("get_recent_messages: last is newest", recent[-1]["content"] == "Assistant 9")
+
+    finally:
+        if original_db_path:
+            os.environ["MEMORY_DB_PATH"] = original_db_path
+        else:
+            os.environ.pop("MEMORY_DB_PATH", None)
+        try:
+            os.unlink(temp_db.name)
+        except Exception:
+            pass
+
+
 def test_validation() -> None:
     start_section("validation")
 
@@ -1154,6 +1233,7 @@ def main() -> None:
     test_backend_websocket()
     test_live_runtime_safety()
     test_tool_runner_safety()
+    test_context_window()
     test_validation()
 
     print()
