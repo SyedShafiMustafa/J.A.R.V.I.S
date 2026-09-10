@@ -434,9 +434,7 @@ Summary:"""
         Returns a list of message dicts in the format expected by the LLM API.
         Now includes conversation summary if available.
         """
-        # Check if summarization is needed
-        self.maybe_summarize(conversation_id)
-        
+        # DO NOT call maybe_summarize here - it should be called after a complete turn
         # Get the latest summary
         summary = self._get_latest_summary(conversation_id)
         

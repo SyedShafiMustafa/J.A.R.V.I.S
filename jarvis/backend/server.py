@@ -391,6 +391,7 @@ class JarvisBackendService:
             self._speak(audio, message)
             if conversation_id:
                 memory.save_message(conversation_id, "assistant", message)
+                memory.maybe_summarize(conversation_id)
             return
 
         session.active_task = task
@@ -422,6 +423,7 @@ class JarvisBackendService:
             self._speak(audio, "Done.")
             if conversation_id:
                 memory.save_message(conversation_id, "assistant", "Done.")
+                memory.maybe_summarize(conversation_id)
         except Exception as exc:
             _log.exception("action failed")
             task.fail(f"unexpected error: {exc}")
@@ -429,6 +431,7 @@ class JarvisBackendService:
             self._speak(audio, "Something went wrong.")
             if conversation_id:
                 memory.save_message(conversation_id, "assistant", "Something went wrong.")
+                memory.maybe_summarize(conversation_id)
         finally:
             session.active_task = None
 
@@ -459,6 +462,8 @@ class JarvisBackendService:
         if reply:
             if conversation_id:
                 memory.save_message(conversation_id, "assistant", reply)
+                # Check if summarization is needed after this complete turn
+                memory.maybe_summarize(conversation_id)
             memory.save_memory(text, reply)
             session.note_reply(reply)
         else:
