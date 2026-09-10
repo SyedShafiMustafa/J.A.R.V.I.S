@@ -66,7 +66,16 @@ def build_live_runtime(
         if attach_logging:
             runtime_bus.subscribe(LoggingObserver(verbose=False))
 
+        # Initialize memory and restore/create conversation
+        memory = Memory()
+        last_conversation = memory.get_last_conversation()
+        if last_conversation:
+            session_id = last_conversation["id"]
+        else:
+            session_id = memory.create_conversation()
+
         session = Session(session_id)
+        session.conversation_id = session_id
         runtime_bus.publish(session_started(session))
 
         lifecycle = Lifecycle(runtime_bus, session)
@@ -78,7 +87,6 @@ def build_live_runtime(
 
         brain = JarvisBrain()
         planner = TaskPlanner()
-        memory = Memory()
         router = CommandRouter()
 
         # Warm up models to avoid cold-loading delays during first conversation

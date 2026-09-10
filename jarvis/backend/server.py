@@ -371,6 +371,13 @@ class JarvisBackendService:
         tool_runner = runtime["tool_runner"]
         orchestrator = runtime["orchestrator"]
         bus = runtime["bus"]
+        memory = runtime["memory"]
+
+        conversation_id = session.conversation_id
+
+        # Save user message
+        if conversation_id:
+            memory.save_message(conversation_id, "user", text)
 
         session.note_user(text)
 
@@ -382,6 +389,8 @@ class JarvisBackendService:
             self.state.set_error(f"planning failed: {exc}")
             self.emit({"type": "error", "message": f"planning failed: {exc}"})
             self._speak(audio, message)
+            if conversation_id:
+                memory.save_message(conversation_id, "assistant", message)
             return
 
         session.active_task = task
@@ -404,16 +413,22 @@ class JarvisBackendService:
                     task.fail(result.message or "tool failed")
                     bus.publish(task_failed(task, session_id=session.id))
                     self._speak(audio, "I couldn't complete that task.")
+                    if conversation_id:
+                        memory.save_message(conversation_id, "assistant", "I couldn't complete that task.")
                     return
 
             task.complete("done")
             bus.publish(task_completed(task, session_id=session.id))
             self._speak(audio, "Done.")
+            if conversation_id:
+                memory.save_message(conversation_id, "assistant", "Done.")
         except Exception as exc:
             _log.exception("action failed")
             task.fail(f"unexpected error: {exc}")
             bus.publish(task_failed(task, session_id=session.id))
             self._speak(audio, "Something went wrong.")
+            if conversation_id:
+                memory.save_message(conversation_id, "assistant", "Something went wrong.")
         finally:
             session.active_task = None
 
@@ -422,6 +437,12 @@ class JarvisBackendService:
         brain = runtime["brain"]
         memory = runtime["memory"]
         session = runtime["session"]
+
+        conversation_id = session.conversation_id
+
+        # Save user message
+        if conversation_id:
+            memory.save_message(conversation_id, "user", text)
 
         memories = memory.search_memories(text)
         context = f"Relevant memories:\n{memories}\n\nUser: {text}" if memories else text
@@ -433,6 +454,8 @@ class JarvisBackendService:
 
         reply = full_reply.strip()
         if reply:
+            if conversation_id:
+                memory.save_message(conversation_id, "assistant", reply)
             memory.save_memory(text, reply)
             session.note_reply(reply)
         else:
@@ -582,6 +605,12 @@ class JarvisBackendService:
             self.state.note_wake_response(wake)
             self._speak(audio, wake)
 
+            # Save wake greeting as assistant message
+            memory = runtime["memory"]
+            conversation_id = session.conversation_id
+            if conversation_id:
+                memory.save_message(conversation_id, "assistant", wake)
+
             if lifecycle.shutdown_requested:
                 return
 
@@ -604,6 +633,10 @@ class JarvisBackendService:
                 if not user:
                     continue
 
+                # Save user message
+                if conversation_id:
+                    memory.save_message(conversation_id, "user", user)
+
                 self.state.set_transcript(user)
                 self.emit({"type": "user_text", "text": user})
                 bus.publish(transcription_ready(session_id=session.id, user_text=user))
@@ -611,6 +644,8 @@ class JarvisBackendService:
                 if _is_shutdown_phrase(user):
                     reply = "Shutting down. Goodbye, Shafi."
                     self._speak(audio, reply)
+                    if conversation_id:
+                        memory.save_message(conversation_id, "assistant", reply)
                     lifecycle.request_shutdown()
                     lifecycle.shutdown()
                     return
@@ -618,6 +653,8 @@ class JarvisBackendService:
                 if _is_sleep_phrase(user):
                     reply = "Going back to sleep."
                     self._speak(audio, reply)
+                    if conversation_id:
+                        memory.save_message(conversation_id, "assistant", reply)
                     lifecycle.request_shutdown()
                     return
 
@@ -631,6 +668,8 @@ class JarvisBackendService:
 
                 if decision.kind == "reply":
                     self._speak(audio, decision.reply or "")
+                    if conversation_id and decision.reply:
+                        memory.save_message(conversation_id, "assistant", decision.reply)
                 elif decision.kind == "action":
                     self._run_action(runtime, user)
                 else:

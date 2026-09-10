@@ -16,6 +16,8 @@ A Session owns:
 - simple lifecycle timestamp helpers
 
 A Task represents an in-progress action plan and its runtime status.
+
+Conversation/Message models for persistent conversation history.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
+import uuid
 
 
 class TaskStatus(Enum):
@@ -77,6 +80,7 @@ class Session:
     active_task: Task | None = None
     last_assistant_reply: str | None = None
     cancelled: bool = False
+    conversation_id: str | None = None  # Link to persistent conversation
 
     # Simple convenience helpers
 
@@ -109,4 +113,48 @@ class Session:
                 "result_message": self.active_task.result_message,
             },
             "cancelled": self.cancelled,
+            "conversation_id": self.conversation_id,
         }
+
+
+@dataclass
+class Conversation:
+    """Persistent conversation container."""
+
+    id: str
+    started_at: datetime
+    last_message_at: datetime
+    message_count: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def create() -> "Conversation":
+        now = datetime.now(timezone.utc)
+        return Conversation(
+            id=uuid.uuid4().hex,
+            started_at=now,
+            last_message_at=now,
+        )
+
+
+@dataclass
+class Message:
+    """Single message in a conversation."""
+
+    id: int | None
+    conversation_id: str
+    role: str  # 'user' | 'assistant'
+    content: str
+    created_at: datetime
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def create(conversation_id: str, role: str, content: str, metadata: dict[str, Any] | None = None) -> "Message":
+        return Message(
+            id=None,
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            created_at=datetime.now(timezone.utc),
+            metadata=metadata or {},
+        )
