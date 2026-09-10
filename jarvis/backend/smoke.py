@@ -1199,6 +1199,72 @@ def test_context_window() -> None:
             pass
 
 
+def test_summarization() -> None:
+    start_section("automatic summarization")
+
+    from core.memory import Memory
+
+    import tempfile
+    import os
+    temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    temp_db.close()
+
+    original_db_path = os.environ.get("MEMORY_DB_PATH")
+    os.environ["MEMORY_DB_PATH"] = temp_db.name
+
+    try:
+        mem = Memory()
+
+        # Create a test conversation
+        conv_id = mem.create_conversation()
+
+        # Test 1: No summarization below 60 messages
+        for i in range(25):
+            mem.save_message(conv_id, "user", f"User msg {i}")
+            mem.save_message(conv_id, "assistant", f"Assistant reply {i}")
+        
+        mem.maybe_summarize(conv_id)
+        summary = mem._get_latest_summary(conv_id)
+        ok("no summarization below 60 messages", summary is None)
+
+        # Test 2: Summarization triggers at 60+ messages (30 turns)
+        # Add 5 more turns = 10 messages = 60 total
+        for i in range(5):
+            mem.save_message(conv_id, "user", f"User msg {i+25}")
+            mem.save_message(conv_id, "assistant", f"Assistant reply {i+25}")
+        
+        # Now we have 60 messages (30 turns)
+        result = mem.maybe_summarize(conv_id)
+        ok("summarization triggered at 60 messages", result is True)
+        
+        summary = mem._get_latest_summary(conv_id)
+        ok("summary stored", summary is not None)
+        ok("summary has text", len(summary["summary_text"]) > 0)
+        ok("summary covers correct range", summary["covered_message_start"] >= 1)
+        ok("summary covers correct range", summary["covered_message_end"] <= 40)
+
+        # Test 3: Context includes summary + recent 10 turns only
+        messages = mem.build_context(conv_id, "New message")
+        # Should have: system + summary + 10 recent turns (20 messages) + current = 23
+        ok("context has summary", any(m["role"] == "system" and "summary" in m["content"].lower() for m in messages))
+        # Should have system + summary + 20 recent messages + current = 23
+        ok("context limited to 10 recent turns", len(messages) <= 23)
+
+        # Test 4: No duplicate summarization without new messages
+        result2 = mem.maybe_summarize(conv_id)
+        ok("no duplicate summarization", result2 is False)
+
+    finally:
+        if original_db_path:
+            os.environ["MEMORY_DB_PATH"] = original_db_path
+        else:
+            os.environ.pop("MEMORY_DB_PATH", None)
+        try:
+            os.unlink(temp_db.name)
+        except Exception:
+            pass
+
+
 def test_validation() -> None:
     start_section("validation")
 

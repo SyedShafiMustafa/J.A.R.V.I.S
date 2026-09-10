@@ -158,3 +158,31 @@ class Message:
             created_at=datetime.now(timezone.utc),
             metadata=metadata or {},
         )
+
+
+@dataclass
+class ConversationSummary:
+    """Persistent conversation summary for context compression."""
+
+    id: int | None
+    conversation_id: str
+    summary_text: str
+    covered_message_start: int  # message ID (inclusive)
+    covered_message_end: int    # message ID (inclusive)
+    created_at: datetime
+
+    @staticmethod
+    def create(
+        conversation_id: str,
+        summary_text: str,
+        covered_message_start: int,
+        covered_message_end: int,
+    ) -> "ConversationSummary":
+        return ConversationSummary(
+            id=None,
+            conversation_id=conversation_id,
+            summary_text=summary_text,
+            covered_message_start=covered_message_start,
+            covered_message_end=covered_message_end,
+            created_at=datetime.now(timezone.utc),
+        )
