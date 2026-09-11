@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from core.knowledge.parsers.base import ParsedDocument, ParserBase
-from core.knowledge.parsers.markdown import MarkdownParser
-from core.knowledge.parsers.pdf import PdfParser
-from core.knowledge.parsers.registry import ParserRegistry
-from core.knowledge.parsers.text import TextParser
+from jarvis.core.knowledge.parsers.base import ParsedDocument, ParserBase
+from jarvis.core.knowledge.parsers.markdown import MarkdownParser
+from jarvis.core.knowledge.parsers.pdf import PdfParser
+from jarvis.core.knowledge.parsers.registry import ParserRegistry
+from jarvis.core.knowledge.parsers.text import TextParser
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -247,9 +247,9 @@ def test_registry_parse(registry, tmp_dir):
 
 def test_parsers_are_instances_of_base():
     """All parser classes inherit from ParserBase."""
-    from core.knowledge.parsers.text import TextParser
-    from core.knowledge.parsers.markdown import MarkdownParser
-    from core.knowledge.parsers.pdf import PdfParser
+    from jarvis.core.knowledge.parsers.text import TextParser
+    from jarvis.core.knowledge.parsers.markdown import MarkdownParser
+    from jarvis.core.knowledge.parsers.pdf import PdfParser
 
     for cls in [TextParser, MarkdownParser, PdfParser]:
         assert issubclass(cls, ParserBase)
@@ -282,6 +282,7 @@ def test_empty_md_file(tmp_dir):
 
 def test_unsupported_extension_error():
     """Clear error for unsupported extensions."""
+    from jarvis.core.knowledge.parsers.registry import ParserRegistry
     registry = ParserRegistry()
     with pytest.raises(ValueError, match="Unsupported file extension"):
         registry.get_parser("/path/to/file.docx")
