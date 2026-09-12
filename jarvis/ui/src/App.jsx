@@ -2,17 +2,19 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { api, connectWebSocket, disconnectWebSocket } from './api';
 
 const STATUS_LABELS = {
-  idle: 'Idle',
-  listening: 'Listening',
-  thinking: 'Thinking',
-  executing: 'Executing',
-  speaking: 'Speaking',
-  error: 'Error',
+  offline: 'OFFLINE',
+  listening_wake: 'LISTENING FOR "HEY JARVIS"',
+  listening_command: 'LISTENING',
+  thinking: 'THINKING',
+  executing: 'THINKING',
+  speaking: 'SPEAKING',
+  error: 'ERROR',
 };
 
 const STATUS_CLASSES = {
-  idle: 'status status-idle',
-  listening: 'status status-listening',
+  offline: 'status status-idle',
+  listening_wake: 'status status-listening',
+  listening_command: 'status status-listening',
   thinking: 'status status-thinking',
   executing: 'status status-executing',
   speaking: 'status status-speaking',
@@ -20,7 +22,7 @@ const STATUS_CLASSES = {
 };
 
 export default function App() {
-  const [status, setStatus] = useState('idle');
+  const [status, setStatus] = useState('offline');
   const [transcript, setTranscript] = useState('');
   const [reply, setReply] = useState('');
   const [toolEvents, setToolEvents] = useState([]);
@@ -44,8 +46,9 @@ export default function App() {
     const type = data.type;
 
     if (type === 'status') {
-      setStatus(data.status);
-      setListening(data.status === 'listening');
+      const nextStatus = data.status === 'listening' ? 'listening_wake' : data.status;
+      setStatus(nextStatus);
+      setListening(nextStatus === 'listening_wake' || nextStatus === 'listening_command');
       if (data.status === 'error') {
         setErrorMessage('Connection or runtime error.');
       }
@@ -64,7 +67,22 @@ export default function App() {
 
     if (type === 'bus_event') {
       const event = data.event;
+      if (event === 'wake.listening') {
+        const stopped = data.meta?.stopped === true;
+        if (!stopped) {
+          setStatus('listening_wake');
+          setListening(true);
+        }
+      }
+      if (event === 'audio.start') {
+        setStatus('listening_command');
+        setListening(true);
+      }
+      if (event === 'audio.stop') {
+        setStatus('listening_wake');
+      }
       if (event === 'transcription_ready' || event === 'stt.ready') {
+        setStatus('thinking');
         setTranscript((meta) => data.meta?.user_text || transcript);
       }
       if (event === 'tool.started') {
@@ -108,6 +126,8 @@ export default function App() {
     }
   }, [transcript, pushToolEvent]);
 
+  const visibleStatus = !healthOk || !connected ? 'offline' : status;
+
   useEffect(() => {
     let cancelled = false;
 
@@ -126,8 +146,6 @@ export default function App() {
 
     ping();
     const healthInterval = setInterval(ping, 8000);
-
-    let wsReady = false;
 
     const connect = async () => {
       try {
@@ -148,11 +166,6 @@ export default function App() {
     };
 
     connect();
-    const ws = connectWebSocket((event) => {
-      if (!cancelled) {
-        applyEvent(event);
-      }
-    });
 
     return () => {
       cancelled = true;
@@ -214,8 +227,8 @@ export default function App() {
             <span className="title">Jarvis</span>
           </div>
           <div className="topbar-right">
-            <span className={STATUS_CLASSES[status] || STATUS_CLASSES.idle}>
-              {STATUS_LABELS[status] || 'Idle'}
+            <span className={STATUS_CLASSES[visibleStatus] || STATUS_CLASSES.offline}>
+              {STATUS_LABELS[visibleStatus] || 'OFFLINE'}
             </span>
             <span className="conn" data-ok={healthOk && connected}>
               {healthOk && connected ? 'Live' : 'Offline'}
@@ -240,7 +253,7 @@ export default function App() {
                 </span>
               </button>
               <div className="control-status">
-                <span className="state-chip">{STATUS_LABELS[status]}</span>
+                <span className="state-chip">{STATUS_LABELS[visibleStatus]}</span>
                 {lastToolEvent && (
                   <span className="tool-chip">
                     {lastToolEvent.kind} {lastToolEvent.tool}
