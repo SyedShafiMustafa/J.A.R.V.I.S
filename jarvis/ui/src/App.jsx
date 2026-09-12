@@ -154,7 +154,6 @@ export default function App() {
             applyEvent(event);
           }
         });
-        wsReady = true;
         if (!cancelled) {
           setConnected(true);
         }

@@ -5,9 +5,8 @@ let wsResolve = null;
 
 export function createWsUrl() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  // Through the Vite dev-server proxy, /ws routes to the backend's
-  // WebSocket endpoint on the same origin.
-  return `${proto}://${location.host}/ws`;
+  const backendPort = import.meta.env.VITE_BACKEND_PORT || '8000';
+  return `${proto}://${location.hostname}:${backendPort}/ws`;
 }
 
 export function connectWebSocket(onEvent) {
@@ -16,17 +15,18 @@ export function connectWebSocket(onEvent) {
   }
 
   const url = createWsUrl();
-  ws = new WebSocket(url);
+  const socket = new WebSocket(url);
+  ws = socket;
 
-  ws.onopen = () => {
-    ws.send(JSON.stringify({ type: 'subscribe' }));
+  socket.onopen = () => {
+    socket.send(JSON.stringify({ type: 'subscribe' }));
     if (wsResolve) {
       wsResolve();
       wsResolve = null;
     }
   };
 
-  ws.onmessage = (event) => {
+  socket.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
       onEvent(data);
@@ -35,12 +35,14 @@ export function connectWebSocket(onEvent) {
     }
   };
 
-  ws.onclose = () => {
-    ws = null;
+  socket.onclose = () => {
+    if (ws === socket) {
+      ws = null;
+    }
   };
 
-  ws.onerror = () => {
-    ws.close();
+  socket.onerror = () => {
+    socket.close();
   };
 
   return new Promise((resolve) => {
