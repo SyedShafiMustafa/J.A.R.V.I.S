@@ -74,12 +74,17 @@ class DesktopController:
 
     def open_app(self, app):
         app = app.lower().strip()
+        if not app or len(app) < 3 or not _SAFE_NAME.match(app):
+            return False
 
         # 1. Desktop shortcut
         shortcut = self.find_app(app)
         if shortcut:
-            os.startfile(shortcut)
-            return True
+            try:
+                os.startfile(shortcut)
+                return True
+            except OSError:
+                return False
 
         # 2. Microsoft Store apps (WhatsApp, Spotify, etc.)
         # The app name is passed as a script argument ($args[0]) instead of
@@ -108,10 +113,9 @@ class DesktopController:
             if result.returncode == 0:
                 return True
 
-        except Exception:
-            pass
+        except (OSError, subprocess.SubprocessError):
+            return False
 
-        print(f"App not found: {app}")
         return False
 
     # -------------------------------------------------
@@ -120,23 +124,15 @@ class DesktopController:
 
     def close_app(self, app):
         app = app.lower().strip()
-
-        # 1. Direct guess: <app>.exe
-        # Use an argument list (no shell) so app-controlled input can never
-        # be interpreted as shell syntax.
-        if _SAFE_NAME.match(app):
-            try:
-                subprocess.run(
-                    ["taskkill", "/IM", f"{app}.exe", "/F"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-            except Exception:
-                pass
-
-        # 2. Fallback: scan real process names and kill any that match
-        #    a word of the app name (handles "visual studio code" -> Code.exe)
+        if not app or len(app) < 3 or not _SAFE_NAME.match(app):
+            return False
+        aliases = {
+            "google chrome": "chrome",
+            "microsoft edge": "msedge",
+            "visual studio code": "code",
+            "vs code": "code",
+        }
+        target = aliases.get(app, app).replace(" ", "")
         try:
             result = subprocess.run(
                 ["tasklist", "/FO", "CSV", "/NH"],
@@ -145,51 +141,51 @@ class DesktopController:
                 timeout=10
             )
 
+            if result.returncode != 0:
+                return False
             for line in result.stdout.splitlines():
                 parts = line.strip().strip('"').split('","')
-
                 if len(parts) < 2:
                     continue
-
                 proc = parts[0].strip().lower()
-                stem = proc.replace(".exe", "")
-
-                for word in app.split():
-                    if len(word) > 2 and word in stem:
-                        try:
-                            subprocess.run(
-                                ["taskkill", "/IM", proc, "/F"],
-                                capture_output=True,
-                                text=True,
-                                timeout=10
-                            )
-                        except Exception:
-                            pass
-                        return
-
-        except Exception:
-            pass
+                stem = proc.removesuffix(".exe")
+                if stem != target:
+                    continue
+                killed = subprocess.run(
+                    ["taskkill", "/IM", proc, "/F"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                return killed.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return False
 
     # -------------------------------------------------
     # Browser tools
     # -------------------------------------------------
 
     def open_url(self, url):
-        webbrowser.open(url)
+        return bool(url and webbrowser.open(url))
 
     def open_youtube(self):
-        webbrowser.open("https://www.youtube.com")
+        return self.open_url("https://www.youtube.com")
 
     def search_youtube(self, query):
+        if not query or not query.strip():
+            return False
         url = (
             "https://www.youtube.com/results?"
             f"search_query={quote_plus(query)}"
         )
-        webbrowser.open(url)
+        return self.open_url(url)
 
     def search_google(self, query):
+        if not query or not query.strip():
+            return False
         url = (
             "https://www.google.com/search?"
             f"q={quote_plus(query)}"
         )
-        webbrowser.open(url)
+        return self.open_url(url)

@@ -327,19 +327,32 @@ class LiveToolRunner:
                 step = dict(call.payload)
                 step["tool"] = call.tool
                 plan = {"goal": call.tool, "steps": [step]}
-                success = self._executor.execute(plan)
-                result = ToolResult(
-                    tool=call.tool,
-                    success=success,
-                    message="ok" if success else "tool reported failure",
-                )
+                result = self._executor.execute(plan)
+                if not result.success:
+                    self.bus.publish(tool_failed(
+                        session_id=self._session_id,
+                        task_id=task_id,
+                        tool=call.tool,
+                        error=result.message,
+                    ))
+                    return ToolResult(
+                        tool=call.tool,
+                        success=False,
+                        message=result.message,
+                        data={"started": True, "completed": False, **(result.data or {})},
+                    )
                 self.bus.publish(tool_finished(
                     session_id=self._session_id,
                     task_id=task_id,
                     tool=call.tool,
-                    success=success,
+                    success=True,
                 ))
-                return result
+                return ToolResult(
+                    tool=call.tool,
+                    success=True,
+                    message=result.message,
+                    data={"started": True, "completed": True, **(result.data or {})},
+                )
             except TransientError:
                 self.bus.publish(tool_failed(
                     session_id=self._session_id,

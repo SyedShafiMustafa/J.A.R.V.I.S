@@ -493,6 +493,9 @@ class JarvisBackendService:
                 if not result.success:
                     task.fail(result.message or "tool failed")
                     bus.publish(task_failed(task, session_id=session.id))
+                    failure = result.message or "tool execution failed"
+                    self._set_error(failure)
+                    self.emit({"type": "error", "message": failure})
                     self._speak(audio, "I couldn't complete that task.")
                     if conversation_id:
                         memory.save_message(conversation_id, "assistant", "I couldn't complete that task.")

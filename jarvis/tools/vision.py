@@ -9,6 +9,9 @@ from PIL import Image
 
 class ScreenVision:
 
+    def __init__(self):
+        self.last_error = None
+
     # ---------------------------------------
     # Capture only the active window
     # ---------------------------------------
@@ -61,7 +64,7 @@ class ScreenVision:
 
             try:
                 conf = int(float(data["conf"][i]))
-            except:
+            except (TypeError, ValueError):
                 conf = 0
 
             if conf < 50:
@@ -121,6 +124,9 @@ class ScreenVision:
     # ---------------------------------------
 
     def click_text(self, phrase):
+        if not phrase or not phrase.strip():
+            self.last_error = "target not found"
+            return False
 
         # Universal messaging input
         if phrase.lower() == "message_box":
@@ -128,21 +134,29 @@ class ScreenVision:
             win = gw.getActiveWindow()
 
             if win is None:
+                self.last_error = "target not found"
                 return False
 
             x = win.left + win.width // 2
             y = win.top + int(win.height * 0.965)
 
             pyautogui.click(x, y)
+            self.last_error = None
             return True
 
         # Normal OCR click
-        item = self.find_text(phrase)
+        try:
+            item = self.find_text(phrase)
+        except Exception as exc:
+            self.last_error = "OCR failure"
+            raise RuntimeError("OCR failure") from exc
 
         if item is None:
+            self.last_error = "target not found"
             return False
 
         pyautogui.click(item["x"], item["y"])
+        self.last_error = None
         return True
 
     # ---------------------------------------
