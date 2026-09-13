@@ -3,6 +3,7 @@ import time
 import types
 
 from audio import wake_word
+from audio.vad import NoSpeechError
 from backend.bus import BackendBus, BackendEvent
 from backend.live_adapters import LiveAudioProvider
 from backend.server import (
@@ -188,6 +189,34 @@ class FakeLifecycle:
     shutdown_requested = False
 
 
+class NoSpeechAudio:
+    def __init__(self):
+        self.transcribe_calls = 0
+
+    def speak(self, text):
+        pass
+
+    def wait(self):
+        pass
+
+    def record_audio(self, cancel_event=None):
+        raise NoSpeechError("no speech")
+
+    def transcribe(self, path):
+        self.transcribe_calls += 1
+        return "should not be used"
+
+
+class FakeSession:
+    id = "test-session"
+    conversation_id = None
+
+
+class FakeMemory:
+    def save_message(self, *args):
+        pass
+
+
 def test_backend_shutdown_stops_active_listener():
     audio = FakeAudio()
     runtime = {
@@ -221,6 +250,26 @@ def test_backend_listener_failure_sets_error_state():
     assert wait_until(lambda: service._voice_thread is None)
     assert service.state.snapshot()["status"] == STATUS_ERROR
     assert service.state.snapshot()["error_message"] == "fake microphone failure"
+
+
+def test_no_speech_returns_to_wake_without_stt():
+    audio = NoSpeechAudio()
+    service = JarvisBackendService()
+    service._voice_mode = True
+    service._voice_future = threading.Event()
+    runtime = {
+        "audio": audio,
+        "session": FakeSession(),
+        "lifecycle": FakeLifecycle(),
+        "orchestrator": None,
+        "bus": BackendBus(),
+        "memory": FakeMemory(),
+    }
+
+    service._voice_conversation(runtime)
+
+    assert audio.transcribe_calls == 0
+    assert service.state.snapshot()["phase"] == PHASE_WAKE_LISTENING
 
 
 def test_authoritative_phase_transitions_and_state_snapshot():

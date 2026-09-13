@@ -59,6 +59,11 @@ from backend.bus import (
     transcription_ready,
     user_interrupt,
 )
+from audio.vad import (
+    NoSpeechError,
+    RecordingCancelledError,
+    RecordingTimeoutError,
+)
 
 _log = logging.getLogger("jarvis.backend")
 logger = logging.getLogger("jarvis.backend")
@@ -707,7 +712,15 @@ class JarvisBackendService:
 
                 try:
                     self._set_phase(PHASE_CAPTURING)
-                    audio_path = audio.record_audio()
+                    audio_path = audio.record_audio(cancel_event=self._voice_future)
+                except (NoSpeechError, RecordingTimeoutError) as exc:
+                    _log.info("recording ended without speech: %s", exc)
+                    if self._voice_mode and self._voice_future is not None and not self._voice_future.is_set():
+                        self._set_phase(PHASE_WAKE_LISTENING)
+                    return
+                except RecordingCancelledError:
+                    self._set_phase(PHASE_STOPPING)
+                    return
                 except Exception as exc:
                     _log.exception("record failed")
                     self._set_error(f"record failed: {exc}")

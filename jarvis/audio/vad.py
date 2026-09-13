@@ -4,15 +4,34 @@ import soundfile as sf
 import numpy as np
 import tempfile
 import time
+import threading
+
+
+class RecordingOutcomeError(Exception):
+    """Base class for expected recording outcomes."""
+
+
+class NoSpeechError(RecordingOutcomeError):
+    pass
+
+
+class RecordingTimeoutError(RecordingOutcomeError):
+    pass
+
+
+class RecordingCancelledError(RecordingOutcomeError):
+    pass
 
 
 class VoiceRecorder:
 
-    def __init__(self):
+    def __init__(self, max_duration=30.0, speech_wait_timeout=5.0):
         self.sample_rate = 16000
         self.channels = 1
+        self.max_duration = max_duration
+        self.speech_wait_timeout = speech_wait_timeout
 
-    def record(self):
+    def record(self, cancel_event=None):
 
         print("[VAD] Speak...")
 
@@ -26,15 +45,28 @@ class VoiceRecorder:
         silence = 0
         started = False
 
-        with sd.InputStream(
+        cancel_event = cancel_event or threading.Event()
+        started_at = time.monotonic()
+        stream = sd.InputStream(
             samplerate=self.sample_rate,
             channels=self.channels,
             callback=callback,
-        ):
-
+        )
+        try:
+            stream.start()
             while True:
+                elapsed = time.monotonic() - started_at
+                if cancel_event.is_set():
+                    raise RecordingCancelledError("recording cancelled")
+                if elapsed >= self.max_duration:
+                    raise RecordingTimeoutError("maximum recording duration reached")
 
-                data = q.get()
+                try:
+                    data = q.get(timeout=0.1)
+                except queue.Empty:
+                    if not started and elapsed >= self.speech_wait_timeout:
+                        raise NoSpeechError("no speech detected before timeout")
+                    continue
 
                 audio = data.flatten()
 
@@ -55,7 +87,14 @@ class VoiceRecorder:
                 # ~0.5 second silence
                 if started and silence > 15:
                     break
+        finally:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
 
+        if not recording:
+            raise NoSpeechError("no speech detected")
         audio = np.concatenate(recording)
 
         path = tempfile.NamedTemporaryFile(

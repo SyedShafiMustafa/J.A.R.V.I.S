@@ -135,10 +135,10 @@ class LiveAudioProvider:
                     self._wake_detector = None
                     self._wake_thread = None
 
-    def record_audio(self) -> str:
+    def record_audio(self, cancel_event=None) -> str:
         self.bus.publish(audio_start(session_id=self._session_id))
         try:
-            path = self.recorder.record()
+            path = self.recorder.record(cancel_event=cancel_event)
             return path
         finally:
             self.bus.publish(audio_stop(session_id=self._session_id))
