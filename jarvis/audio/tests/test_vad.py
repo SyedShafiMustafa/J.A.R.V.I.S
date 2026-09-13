@@ -49,7 +49,7 @@ def audio_batch(volume):
 def test_speech_and_silence_complete_recording(monkeypatch):
     stream = install_stream(
         monkeypatch,
-        [audio_batch(0.02)] + [audio_batch(0.0)] * 16,
+        [audio_batch(0.02)] * 12 + [audio_batch(0.0)] * 16,
     )
 
     path = vad.VoiceRecorder(
@@ -59,6 +59,21 @@ def test_speech_and_silence_complete_recording(monkeypatch):
 
     assert path == "capture.wav"
     assert stream.started and stream.stopped and stream.closed
+
+
+def test_sustained_noise_spike_does_not_start_recording(monkeypatch):
+    stream = install_stream(
+        monkeypatch,
+        [audio_batch(0.02)] * 11 + [audio_batch(0.001)] * 4,
+    )
+
+    with pytest.raises(vad.NoSpeechError):
+        vad.VoiceRecorder(
+            max_duration=1,
+            speech_wait_timeout=0.05,
+        ).record()
+
+    assert stream.stopped and stream.closed
 
 
 @pytest.mark.parametrize(

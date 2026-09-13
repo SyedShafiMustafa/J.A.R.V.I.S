@@ -242,6 +242,7 @@ class JarvisBackendService:
         self._voice_thread: threading.Thread | None = None
         self._voice_future: threading.Event | None = None
         self._runtime: dict[str, Any] | None = None
+        self._runtime_lock = threading.Lock()
         self._started = False
 
         # WebSocket clients: handler instances currently upgraded.
@@ -292,7 +293,9 @@ class JarvisBackendService:
 
     def _get_runtime(self) -> dict[str, Any]:
         if self._runtime is None:
-            self._runtime = self._runtime_builder(session_id="voice-session")
+            with self._runtime_lock:
+                if self._runtime is None:
+                    self._runtime = self._runtime_builder(session_id="voice-session")
         return self._runtime
 
     def runtime_unavailable_message(self) -> str | None:
@@ -346,9 +349,9 @@ class JarvisBackendService:
                 return 500, {"error": str(exc)}
         thread = self._voice_thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=3.0)
+            thread.join(timeout=10.0)
         if thread is not None and thread.is_alive():
-            message = "voice listener did not stop within 3 seconds"
+            message = "voice listener did not stop within 10 seconds"
             self._set_error(message)
             self.emit({"type": "error", "message": message})
             return 500, {"error": message}
@@ -369,6 +372,10 @@ class JarvisBackendService:
             self._set_error(str(exc))
             self.emit({"type": "error", "message": str(exc)})
             return 500, {"error": str(exc)}
+        if not self._voice_mode and self.state.status != STATUS_ERROR:
+            self.state.set_status(STATUS_IDLE)
+            self._set_phase(PHASE_IDLE)
+            self.emit({"type": "status", "status": STATUS_IDLE})
         return 200, {"received": text}
 
     # ------------------------------------------------------------------
@@ -592,6 +599,8 @@ class JarvisBackendService:
         self._set_phase(PHASE_WAKE_LISTENING)
         try:
             runtime = self._get_runtime()
+            if not self._voice_mode or self._voice_future is None or self._voice_future.is_set():
+                return
             bus = runtime["bus"]
             self._attach_bus_bridge(bus)
 

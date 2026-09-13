@@ -25,11 +25,12 @@ class RecordingCancelledError(RecordingOutcomeError):
 
 class VoiceRecorder:
 
-    def __init__(self, max_duration=30.0, speech_wait_timeout=5.0):
+    def __init__(self, max_duration=30.0, speech_wait_timeout=5.0, speech_start_frames=12):
         self.sample_rate = 16000
         self.channels = 1
         self.max_duration = max_duration
         self.speech_wait_timeout = speech_wait_timeout
+        self.speech_start_frames = speech_start_frames
 
     def record(self, cancel_event=None):
 
@@ -44,6 +45,7 @@ class VoiceRecorder:
 
         silence = 0
         started = False
+        speech_frames = 0
 
         cancel_event = cancel_event or threading.Event()
         started_at = time.monotonic()
@@ -73,7 +75,14 @@ class VoiceRecorder:
                 volume = np.abs(audio).mean()
 
                 if volume > 0.015:
+                    speech_frames += 1
+                else:
+                    speech_frames = 0
+
+                if not started and speech_frames >= self.speech_start_frames:
                     started = True
+
+                if started and volume > 0.015:
                     silence = 0
 
                 if started:

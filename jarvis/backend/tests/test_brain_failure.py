@@ -1,6 +1,12 @@
 from agents.ollama_errors import OllamaTimeoutError, PlannerValidationError
 from backend.bus import BackendBus
-from backend.server import JarvisBackendService, PHASE_ERROR, STATUS_ERROR
+from backend.server import (
+    JarvisBackendService,
+    PHASE_ERROR,
+    PHASE_IDLE,
+    STATUS_ERROR,
+    STATUS_IDLE,
+)
 
 
 class FakeAudio:
@@ -29,6 +35,7 @@ class FakeMemory:
 
 
 class FakeSession:
+    id = "test-session"
     conversation_id = None
 
     def note_user(self, text):
@@ -36,6 +43,9 @@ class FakeSession:
 
     def note_reply(self, reply):
         self.reply = reply
+
+    def note_decision(self, decision):
+        self.decision = decision
 
 
 class FailingBrain:
@@ -64,6 +74,17 @@ class FakeOrchestrator:
 
     def plan_action(self, text):
         return self.planner.plan_action(text)
+
+
+class ReplyDecision:
+    kind = "reply"
+    reply = "Hello."
+    metadata = {}
+
+
+class ReplyOrchestrator:
+    def decide(self, text):
+        return ReplyDecision()
 
 
 def runtime(brain):
@@ -120,3 +141,22 @@ def test_planner_failure_leaves_error_phase_not_thinking():
     assert snapshot["phase"] == PHASE_ERROR
     assert snapshot["status"] == STATUS_ERROR
     assert snapshot["error_message"] == "I couldn't safely interpret that action plan."
+
+
+def test_successful_text_command_returns_to_idle_phase():
+    service = JarvisBackendService()
+    current = {
+        "audio": FakeAudio(),
+        "bus": BackendBus(),
+        "orchestrator": ReplyOrchestrator(),
+        "session": FakeSession(),
+    }
+    service._runtime_builder = lambda **_: current
+
+    status, payload = service.handle_command({"text": "hello"})
+
+    assert status == 200
+    assert payload == {"received": "hello"}
+    snapshot = service.state.snapshot()
+    assert snapshot["status"] == STATUS_IDLE
+    assert snapshot["phase"] == PHASE_IDLE
