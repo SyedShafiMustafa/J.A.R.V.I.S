@@ -74,6 +74,17 @@ STATUS_EXECUTING = "executing"
 STATUS_SPEAKING = "speaking"
 STATUS_ERROR = "error"
 
+PHASE_IDLE = "IDLE"
+PHASE_WAKE_LISTENING = "WAKE_LISTENING"
+PHASE_WAKE_DETECTED = "WAKE_DETECTED"
+PHASE_CAPTURING = "CAPTURING"
+PHASE_TRANSCRIBING = "TRANSCRIBING"
+PHASE_THINKING = "THINKING"
+PHASE_EXECUTING = "EXECUTING"
+PHASE_SPEAKING = "SPEAKING"
+PHASE_ERROR = "ERROR"
+PHASE_STOPPING = "STOPPING"
+
 VALID_STATUSES = {
     STATUS_IDLE,
     STATUS_LISTENING,
@@ -81,6 +92,19 @@ VALID_STATUSES = {
     STATUS_EXECUTING,
     STATUS_SPEAKING,
     STATUS_ERROR,
+}
+
+VALID_PHASES = {
+    PHASE_IDLE,
+    PHASE_WAKE_LISTENING,
+    PHASE_WAKE_DETECTED,
+    PHASE_CAPTURING,
+    PHASE_TRANSCRIBING,
+    PHASE_THINKING,
+    PHASE_EXECUTING,
+    PHASE_SPEAKING,
+    PHASE_ERROR,
+    PHASE_STOPPING,
 }
 
 WAKE_RESPONSES = [
@@ -108,6 +132,7 @@ class JarvisState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.status = STATUS_IDLE
+        self.phase = PHASE_IDLE
         self.transcript: str | None = None
         self.reply: str | None = None
         self.tool_events: list[dict[str, Any]] = []
@@ -121,6 +146,7 @@ class JarvisState:
         with self.lock:
             return {
                 "status": self.status,
+                "phase": self.phase,
                 "transcript": self.transcript,
                 "reply": self.reply,
                 "tool_events": list(self.tool_events),
@@ -138,6 +164,12 @@ class JarvisState:
         with self.lock:
             self.status = status
 
+    def set_phase(self, phase: str) -> None:
+        if phase not in VALID_PHASES:
+            raise ValueError(f"invalid phase: {phase}")
+        with self.lock:
+            self.phase = phase
+
     def set_transcript(self, text: str) -> None:
         with self.lock:
             self.transcript = text
@@ -150,6 +182,7 @@ class JarvisState:
         with self.lock:
             self.error_message = message
             self.status = STATUS_ERROR
+            self.phase = PHASE_ERROR
 
     def note_user_text(self, text: str) -> None:
         with self.lock:
@@ -268,6 +301,14 @@ class JarvisBackendService:
     def _state_response(self) -> tuple[int, dict[str, Any]]:
         return 200, self.state.snapshot()
 
+    def _set_phase(self, phase: str) -> None:
+        self.state.set_phase(phase)
+        self.emit({"type": "state", "state": self.state.snapshot()})
+
+    def _set_error(self, message: str) -> None:
+        self.state.set_error(message)
+        self.emit({"type": "state", "state": self.state.snapshot()})
+
     def start_listening(self) -> tuple[int, dict[str, Any]]:
         if self._voice_mode:
             return 409, {"error": "listening already active"}
@@ -281,6 +322,7 @@ class JarvisBackendService:
         if not self._voice_mode:
             return 409, {"error": "not listening"}
         self._voice_mode = False
+        self._set_phase(PHASE_STOPPING)
         if self._voice_future is not None:
             self._voice_future.set()
         runtime = self._runtime
@@ -288,7 +330,7 @@ class JarvisBackendService:
             try:
                 runtime["audio"].stop_wake_word()
             except Exception as exc:
-                self.state.set_error(f"wake listener stop failed: {exc}")
+                self._set_error(f"wake listener stop failed: {exc}")
                 self.emit({"type": "error", "message": f"wake listener stop failed: {exc}"})
                 return 500, {"error": str(exc)}
         thread = self._voice_thread
@@ -296,7 +338,7 @@ class JarvisBackendService:
             thread.join(timeout=3.0)
         if thread is not None and thread.is_alive():
             message = "voice listener did not stop within 3 seconds"
-            self.state.set_error(message)
+            self._set_error(message)
             self.emit({"type": "error", "message": message})
             return 500, {"error": message}
         return 200, {"stopped": True}
@@ -308,12 +350,12 @@ class JarvisBackendService:
         try:
             self._dispatch_command(text)
         except RuntimeUnavailableError as exc:
-            self.state.set_error(str(exc))
+            self._set_error(str(exc))
             self.emit({"type": "error", "message": str(exc)})
             return 503, {"error": str(exc)}
         except Exception as exc:
             _log.exception("command dispatch failed")
-            self.state.set_error(str(exc))
+            self._set_error(str(exc))
             self.emit({"type": "error", "message": str(exc)})
             return 500, {"error": str(exc)}
         return 200, {"received": text}
@@ -350,6 +392,7 @@ class JarvisBackendService:
 
     def _dispatch_command(self, text: str) -> None:
         self.state.set_status(STATUS_THINKING)
+        self._set_phase(PHASE_THINKING)
         self.state.note_user_text(text)
         self.emit({"type": "user_text", "text": text})
 
@@ -374,6 +417,7 @@ class JarvisBackendService:
 
         if decision.kind == "action":
             self.state.set_status(STATUS_EXECUTING)
+            self._set_phase(PHASE_EXECUTING)
             self.emit({"type": "status", "status": STATUS_EXECUTING})
             self._run_action(runtime, text)
             return
@@ -390,6 +434,7 @@ class JarvisBackendService:
         memory = runtime["memory"]
 
         conversation_id = session.conversation_id
+        self._set_phase(PHASE_EXECUTING)
 
         # Save user message
         if conversation_id:
@@ -402,7 +447,7 @@ class JarvisBackendService:
         except Exception as exc:
             _log.exception("planning failed")
             message = "I couldn't plan that task. Please check that Ollama is running."
-            self.state.set_error(f"planning failed: {exc}")
+            self._set_error(f"planning failed: {exc}")
             self.emit({"type": "error", "message": f"planning failed: {exc}"})
             self._speak(audio, message)
             if conversation_id:
@@ -487,6 +532,7 @@ class JarvisBackendService:
             self.emit({"type": "status", "status": STATUS_IDLE})
 
     def _speak(self, audio: Any, text: str) -> None:
+        self._set_phase(PHASE_SPEAKING)
         self.state.set_status(STATUS_SPEAKING)
         self.emit({"type": "status", "status": STATUS_SPEAKING})
         self.emit({"type": "reply", "text": text})
@@ -496,7 +542,7 @@ class JarvisBackendService:
             audio.wait()
         except Exception as exc:
             _log.exception("speak failed")
-            self.state.set_error(f"speak failed: {exc}")
+            self._set_error(f"speak failed: {exc}")
             self.emit({"type": "error", "message": f"speak failed: {exc}"})
         finally:
             if self.state.status not in {STATUS_ERROR}:
@@ -509,7 +555,7 @@ class JarvisBackendService:
 
     def _run_voice_loop(self) -> None:
         self.state.set_status(STATUS_LISTENING)
-        self.emit({"type": "status", "status": STATUS_LISTENING})
+        self._set_phase(PHASE_WAKE_LISTENING)
         try:
             runtime = self._get_runtime()
             bus = runtime["bus"]
@@ -519,11 +565,11 @@ class JarvisBackendService:
             self._wait_for_wake_and_converse(runtime)
         except RuntimeUnavailableError as exc:
             _log.error("voice loop unavailable: %s", exc)
-            self.state.set_error(str(exc))
+            self._set_error(str(exc))
             self.emit({"type": "error", "message": str(exc)})
         except Exception as exc:
             _log.exception("voice loop failed")
-            self.state.set_error(str(exc))
+            self._set_error(str(exc))
             self.emit({"type": "error", "message": str(exc)})
         finally:
             # Clean up wake word detection
@@ -534,7 +580,7 @@ class JarvisBackendService:
             except Exception as exc:
                 cleanup_failed = True
                 _log.exception("wake listener cleanup failed")
-                self.state.set_error(f"wake listener cleanup failed: {exc}")
+                self._set_error(f"wake listener cleanup failed: {exc}")
                 self.emit({"type": "error", "message": f"wake listener cleanup failed: {exc}"})
             self._voice_mode = False
             self._voice_future = None
@@ -542,6 +588,7 @@ class JarvisBackendService:
             self._wake_thread = None
             if not cleanup_failed and self.state.snapshot()["status"] != STATUS_ERROR:
                 self.state.set_status(STATUS_IDLE)
+                self._set_phase(PHASE_IDLE)
                 self.emit({"type": "status", "status": STATUS_IDLE})
 
     def _wait_for_wake_and_converse(self, runtime: dict[str, Any]) -> None:
@@ -555,13 +602,14 @@ class JarvisBackendService:
 
         def on_wake(event):
             if getattr(event, "kind", "") == "wake.detected":
+                self._set_phase(PHASE_WAKE_DETECTED)
                 wake_event.set()
 
         def on_wake_error(event):
             if getattr(event, "kind", "") != "wake.error":
                 return
             error = event.meta.get("error", "wake listener failed")
-            self.state.set_error(error)
+            self._set_error(error)
             self.emit({"type": "error", "message": error})
             if self._voice_future is not None:
                 self._voice_future.set()
@@ -573,10 +621,11 @@ class JarvisBackendService:
         try:
             # Subscribe before starting so an immediate listener failure is observed.
             audio.start_wake_word()
+            self._set_phase(PHASE_WAKE_LISTENING)
             while self._voice_mode and not self._voice_future.is_set():
                 wake_event.clear()
                 self.state.set_status(STATUS_LISTENING)
-                self.emit({"type": "status", "status": STATUS_LISTENING})
+                self._set_phase(PHASE_WAKE_LISTENING)
 
                 # Wait for wake word (with timeout to check voice_mode)
                 while self._voice_mode and not self._voice_future.is_set():
@@ -606,7 +655,7 @@ class JarvisBackendService:
             audio.wait()
         except Exception as exc:
             _log.exception("speak failed")
-            self.state.set_error(f"speak failed: {exc}")
+            self._set_error(f"speak failed: {exc}")
             self.emit({"type": "error", "message": f"speak failed: {exc}"})
         finally:
             if self.state.status not in {STATUS_ERROR}:
@@ -657,13 +706,15 @@ class JarvisBackendService:
                     return
 
                 try:
+                    self._set_phase(PHASE_CAPTURING)
                     audio_path = audio.record_audio()
                 except Exception as exc:
                     _log.exception("record failed")
-                    self.state.set_error(f"record failed: {exc}")
+                    self._set_error(f"record failed: {exc}")
                     self.emit({"type": "error", "message": f"record failed: {exc}"})
                     return
 
+                self._set_phase(PHASE_TRANSCRIBING)
                 user = (audio.transcribe(audio_path) or "").strip()
 
                 if not user:
@@ -699,6 +750,7 @@ class JarvisBackendService:
                     return
 
                 session.note_user(user)
+                self._set_phase(PHASE_THINKING)
                 decision = orchestrator.decide(user)
                 session.note_decision(decision.metadata or {})
 

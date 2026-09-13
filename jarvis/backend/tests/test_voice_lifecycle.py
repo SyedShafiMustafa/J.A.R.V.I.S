@@ -5,7 +5,20 @@ import types
 from audio import wake_word
 from backend.bus import BackendBus, BackendEvent
 from backend.live_adapters import LiveAudioProvider
-from backend.server import JarvisBackendService, STATUS_ERROR
+from backend.server import (
+    JarvisBackendService,
+    PHASE_CAPTURING,
+    PHASE_ERROR,
+    PHASE_EXECUTING,
+    PHASE_IDLE,
+    PHASE_SPEAKING,
+    PHASE_STOPPING,
+    PHASE_THINKING,
+    PHASE_TRANSCRIBING,
+    PHASE_WAKE_DETECTED,
+    PHASE_WAKE_LISTENING,
+    STATUS_ERROR,
+)
 
 
 class FakeDetector:
@@ -208,3 +221,35 @@ def test_backend_listener_failure_sets_error_state():
     assert wait_until(lambda: service._voice_thread is None)
     assert service.state.snapshot()["status"] == STATUS_ERROR
     assert service.state.snapshot()["error_message"] == "fake microphone failure"
+
+
+def test_authoritative_phase_transitions_and_state_snapshot():
+    service = JarvisBackendService()
+    phases = [
+        PHASE_IDLE,
+        PHASE_WAKE_LISTENING,
+        PHASE_WAKE_DETECTED,
+        PHASE_CAPTURING,
+        PHASE_TRANSCRIBING,
+        PHASE_THINKING,
+        PHASE_EXECUTING,
+        PHASE_SPEAKING,
+        PHASE_STOPPING,
+        PHASE_IDLE,
+    ]
+    for phase in phases:
+        service._set_phase(phase)
+        assert service.state.snapshot()["phase"] == phase
+
+    service.state.set_error("phase test failure")
+    assert service.state.snapshot()["phase"] == PHASE_ERROR
+
+
+def test_state_response_is_websocket_reconnect_snapshot():
+    service = JarvisBackendService()
+    service._set_phase(PHASE_TRANSCRIBING)
+
+    status, snapshot = service._state_response()
+
+    assert status == 200
+    assert snapshot["phase"] == PHASE_TRANSCRIBING

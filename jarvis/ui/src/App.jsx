@@ -3,13 +3,13 @@ import { api, connectWebSocket, disconnectWebSocket } from './api';
 
 export default function App() {
   const [status, setStatus] = useState('offline');
+  const [phase, setPhase] = useState('IDLE');
   const [transcript, setTranscript] = useState('');
   const [reply, setReply] = useState('');
   const [toolEvents, setToolEvents] = useState([]);
   const [errorMessage, setErrorMessage] = useState('');
   const [healthOk, setHealthOk] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [listening, setListening] = useState(false);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [activityEvents, setActivityEvents] = useState([]);
@@ -37,10 +37,9 @@ export default function App() {
     if (type === 'state') {
       const nextState = data.state || {};
       if (nextState.status) {
-        const nextStatus = nextState.status === 'listening' ? 'listening_wake' : nextState.status;
-        setStatus(nextStatus);
-        setListening(nextStatus === 'listening_wake' || nextStatus === 'listening_command');
+        setStatus(nextState.status);
       }
+      if (nextState.phase) setPhase(nextState.phase);
       if (nextState.transcript) setTranscript(nextState.transcript);
       if (nextState.reply) setReply(nextState.reply);
       if (nextState.error_message) setErrorMessage(nextState.error_message);
@@ -48,10 +47,8 @@ export default function App() {
     }
 
     if (type === 'status') {
-      const nextStatus = data.status === 'listening' ? 'listening_wake' : data.status;
-      setStatus(nextStatus);
-      setListening(nextStatus === 'listening_wake' || nextStatus === 'listening_command');
-      pushActivity(data.status === 'listening' ? 'WAKE LISTENER' : data.status.toUpperCase());
+      setStatus(data.status);
+      pushActivity(data.status.toUpperCase());
       if (data.status === 'error') {
         setErrorMessage('Connection or runtime error.');
       }
@@ -75,25 +72,19 @@ export default function App() {
       if (event === 'wake.listening') {
         const stopped = data.meta?.stopped === true;
         if (!stopped) {
-          setStatus('listening_wake');
-          setListening(true);
           pushActivity('WAKE LISTENER READY');
         } else {
           pushActivity('WAKE LISTENER STOPPED');
         }
       }
       if (event === 'audio.start') {
-        setStatus('listening_command');
-        setListening(true);
         pushActivity('MICROPHONE ACTIVE');
       }
       if (event === 'audio.stop') {
-        setStatus('listening_wake');
         pushActivity('MICROPHONE IDLE');
       }
       if (event === 'transcription_ready' || event === 'stt.ready') {
-        setStatus('thinking');
-        setTranscript((meta) => data.meta?.user_text || transcript);
+        setTranscript((current) => data.meta?.user_text || current);
         pushActivity('STT COMPLETE');
       }
       if (event === 'tool.started') {
@@ -141,7 +132,9 @@ export default function App() {
     }
   }, [transcript, pushActivity, pushToolEvent]);
 
-  const visibleStatus = !healthOk || !connected ? 'offline' : status;
+  const visiblePhase = !healthOk || !connected ? 'OFFLINE' : phase;
+  const listeningPhases = new Set(['WAKE_LISTENING', 'WAKE_DETECTED', 'CAPTURING', 'TRANSCRIBING']);
+  const listening = listeningPhases.has(visiblePhase);
 
   useEffect(() => {
     let cancelled = false;
@@ -232,16 +225,19 @@ export default function App() {
   };
 
   const lastToolEvent = toolEvents[0];
-  const statusMeta = {
-    offline: { label: 'OFFLINE', detail: 'Backend connection unavailable' },
-    listening_wake: { label: 'LISTENING FOR "HEY JARVIS"', detail: 'Waiting for wake word...' },
-    listening_command: { label: 'LISTENING', detail: 'Speak now' },
-    thinking: { label: 'THINKING', detail: 'Processing request...' },
-    executing: { label: 'EXECUTING', detail: 'Executing task...' },
-    speaking: { label: 'SPEAKING', detail: 'Responding...' },
-    error: { label: 'ERROR', detail: 'Attention required' },
-  };
-  const activeStatus = statusMeta[visibleStatus] || statusMeta.offline;
+  const activeStatus = {
+    OFFLINE: { label: 'OFFLINE', detail: 'Backend connection unavailable' },
+    IDLE: { label: 'IDLE', detail: 'Awaiting activity' },
+    WAKE_LISTENING: { label: 'LISTENING FOR "HEY JARVIS"', detail: 'Waiting for wake word...' },
+    WAKE_DETECTED: { label: 'WAKE DETECTED', detail: 'Preparing command capture...' },
+    CAPTURING: { label: 'LISTENING', detail: 'Speak now' },
+    TRANSCRIBING: { label: 'TRANSCRIBING', detail: 'Converting speech to text...' },
+    THINKING: { label: 'THINKING', detail: 'Processing request...' },
+    EXECUTING: { label: 'EXECUTING', detail: 'Executing task...' },
+    SPEAKING: { label: 'SPEAKING', detail: 'Responding...' },
+    STOPPING: { label: 'STOPPING', detail: 'Releasing voice resources...' },
+    ERROR: { label: 'ERROR', detail: 'Attention required' },
+  }[visiblePhase] || { label: 'OFFLINE', detail: 'Backend connection unavailable' };
   const activity = activityEvents.length ? activityEvents : [{ label: 'SYSTEM READY', detail: 'Awaiting activity', time: Date.now() }];
 
   return (
@@ -273,7 +269,7 @@ export default function App() {
               <div className="telemetry-row"><span>MEMORY</span><strong>N/A</strong></div>
               <div className="telemetry-row"><span>NETWORK</span><strong className={healthOk ? 'good' : ''}>{healthOk ? 'CONNECTED' : 'N/A'}</strong></div>
               <div className="telemetry-row"><span>MICROPHONE</span><strong className={listening ? 'good' : ''}>{listening ? 'ACTIVE' : 'READY'}</strong></div>
-              <div className="telemetry-row"><span>WAKE DETECTOR</span><strong className={visibleStatus === 'listening_wake' ? 'good' : ''}>{visibleStatus === 'listening_wake' ? 'ACTIVE' : 'IDLE'}</strong></div>
+              <div className="telemetry-row"><span>WAKE DETECTOR</span><strong className={visiblePhase === 'WAKE_LISTENING' ? 'good' : ''}>{visiblePhase === 'WAKE_LISTENING' ? 'ACTIVE' : 'IDLE'}</strong></div>
             </div>
             <div className="telemetry-divider" />
             <div className="panel-label">VOICE SUBSYSTEM <span>02</span></div>
@@ -285,7 +281,7 @@ export default function App() {
             <div className="metric-line"><span>SESSION</span><b>{connected ? 'READY' : 'N/A'}</b></div>
           </aside>
 
-          <section className={`core-panel core-${visibleStatus}`}>
+          <section className={`core-panel core-${visiblePhase}`}>
             <div className="core-kicker">JARVIS / CORE PROCESSOR</div>
             <div className="core-visual" aria-label={activeStatus.label}>
               <div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="orbit orbit-three" />
