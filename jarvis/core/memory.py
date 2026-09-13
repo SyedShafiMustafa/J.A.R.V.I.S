@@ -2,6 +2,7 @@ import threading
 import sqlite3
 import uuid
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +10,9 @@ from config.settings import MEMORY_DB_PATH
 
 # Import models for type hints
 from backend.models import Conversation, Message
+from agents.ollama_errors import OllamaError
+
+_log = logging.getLogger("jarvis.memory")
 
 
 def _iso_now() -> str:
@@ -387,7 +391,11 @@ Summary:"""
             
             summary_parts = list(brain.stream(messages))
             return " ".join(summary_parts).strip()
+        except OllamaError as exc:
+            _log.warning("conversation summary unavailable: %s", type(exc).__name__)
+            return None
         except Exception:
+            _log.exception("conversation summary generation failed")
             return None
 
     # --- Context Window Engine ---

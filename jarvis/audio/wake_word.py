@@ -18,6 +18,15 @@ class WakeWordDetector:
         self._stop_event = None
         self._stream = None
         self._lock = threading.Lock()
+        self._error_reported = False
+
+    def _report_error(self, error: Exception) -> None:
+        with self._lock:
+            if self._error_reported:
+                return
+            self._error_reported = True
+        if self.on_error is not None:
+            self.on_error(error)
 
     def stop(self):
         with self._lock:
@@ -35,7 +44,7 @@ class WakeWordDetector:
         try:
             self.on_detect()
         except Exception as e:
-            print(f"[WAKE] Conversation error: {e}")
+            self._report_error(e)
         finally:
             self.busy = False
 
@@ -44,24 +53,29 @@ class WakeWordDetector:
         stop_event = stop_event or threading.Event()
         with self._lock:
             self._stop_event = stop_event
+            self._error_reported = False
 
         def callback(indata, frames, time, status):
-            audio = (indata[:, 0] * 32767).astype(np.int16)
-            prediction = self.model.predict(audio)
+            try:
+                audio = (indata[:, 0] * 32767).astype(np.int16)
+                prediction = self.model.predict(audio)
 
-            score = prediction.get(WAKEWORD, 0.0)
+                score = prediction.get(WAKEWORD, 0.0)
 
-            if score > 0.5 and not self.triggered and not self.busy:
-                self.triggered = True
-                self.busy = True
-                print("[WAKE] Wake word detected!")
+                if score > 0.5 and not self.triggered and not self.busy:
+                    self.triggered = True
+                    self.busy = True
+                    print("[WAKE] Wake word detected!")
 
-                # Run the conversation on its own thread — never block
-                # the audio callback (that causes buffer overflows).
-                threading.Thread(target=self._handle_detection, daemon=True).start()
+                    # Run the conversation on its own thread — never block
+                    # the audio callback (that causes buffer overflows).
+                    threading.Thread(target=self._handle_detection, daemon=True).start()
 
-            if score < 0.2:
-                self.triggered = False
+                if score < 0.2:
+                    self.triggered = False
+            except Exception as exc:
+                self._report_error(exc)
+                stop_event.set()
 
         try:
             stream = sd.InputStream(
@@ -72,8 +86,7 @@ class WakeWordDetector:
                 callback=callback,
             )
         except Exception as exc:
-            if self.on_error is not None:
-                self.on_error(exc)
+            self._report_error(exc)
             raise
         with self._lock:
             self._stream = stream
@@ -84,8 +97,7 @@ class WakeWordDetector:
             while not stop_event.wait(0.1):
                 pass
         except Exception as exc:
-            if self.on_error is not None:
-                self.on_error(exc)
+            self._report_error(exc)
             raise
         finally:
             try:

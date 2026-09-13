@@ -26,6 +26,9 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from backend.models import Session, Task, TaskStatus
+import logging
+
+_log = logging.getLogger("jarvis.bus")
 
 # ---------------------------------------------------------------------------
 # Event types
@@ -233,7 +236,7 @@ class BackendBus:
                 listener(event)
             except Exception:
                 # Never let an observer break the backend flow.
-                pass
+                _log.exception("backend event observer failed")
 
 
 # ---------------------------------------------------------------------------

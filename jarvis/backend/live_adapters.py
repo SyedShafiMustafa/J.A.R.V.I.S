@@ -78,6 +78,7 @@ class LiveAudioProvider:
         self._wake_detector = None
         self._wake_thread = None
         self._wake_lock = threading.Lock()
+        self._wake_error_reported = False
         self._session_id = session_id
         self._speaking = False
         self._barge_in_thread = None
@@ -99,6 +100,7 @@ class LiveAudioProvider:
                     wake_listening(session_id=self._session_id)
                 ),
             )
+            self._wake_error_reported = False
             self._wake_detector = detector
             thread = threading.Thread(
                 target=self._run_wake_detector,
@@ -130,8 +132,12 @@ class LiveAudioProvider:
     def _run_wake_detector(self, detector) -> None:
         try:
             detector.start()
-        except Exception:
+        except Exception as exc:
             _log.exception("wake word listener failed")
+            with self._wake_lock:
+                reported = getattr(self, "_wake_error_reported", False)
+            if not reported:
+                self._on_wake_error(exc)
         finally:
             with self._wake_lock:
                 if self._wake_detector is detector:
@@ -262,6 +268,8 @@ class LiveAudioProvider:
         self.bus.publish(wake_detected(session_id=self._session_id))
 
     def _on_wake_error(self, error: Exception) -> None:
+        with self._wake_lock:
+            self._wake_error_reported = True
         self.bus.publish(BackendEvent(
             kind="wake.error",
             session_id=self._session_id,

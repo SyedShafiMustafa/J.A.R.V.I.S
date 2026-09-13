@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import socket
 import sys
 import threading
 import time
@@ -273,7 +274,7 @@ class JarvisBackendService:
             try:
                 self._http_server.shutdown()
             except Exception:
-                pass
+                _log.exception("http server shutdown failed")
             self._http_server = None
         if self._http_server_thread is not None:
             self._http_server_thread.join(timeout=5)
@@ -382,8 +383,10 @@ class JarvisBackendService:
             for client in list(self._ws_clients):
                 try:
                     client._ws_send_frame(0x1, data)
+                except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                    _log.debug("websocket client disconnected during broadcast")
                 except Exception:
-                    pass
+                    _log.exception("websocket broadcast failed")
 
     def _register_ws_client(self, client: Any) -> None:
         with self._ws_clients_lock:
@@ -896,15 +899,18 @@ def _make_handler(service: JarvisBackendService):
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-            except Exception:
+            except (TypeError, ValueError):
                 length = 0
 
             body = self.rfile.read(length) if length else b"{}"
 
             try:
                 payload = json.loads(body.decode("utf-8"))
-            except Exception:
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 self._respond(400, {"error": "invalid json"})
+                return
+            if not isinstance(payload, dict):
+                self._respond(400, {"error": "json object required"})
                 return
 
             if self.path == "/api/listen/start":
@@ -935,6 +941,8 @@ def _make_handler(service: JarvisBackendService):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                _log.debug("http client disconnected before response completed")
             except Exception:
                 _log.exception("http response write failed")
 
@@ -951,8 +959,10 @@ def _make_handler(service: JarvisBackendService):
                 _log.exception("websocket handshake failed")
                 try:
                     self.connection.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                    _log.debug("websocket client disconnected during handshake error response")
                 except Exception:
-                    pass
+                    _log.exception("websocket handshake error response failed")
                 return
 
             self.close_connection = True
@@ -1030,13 +1040,25 @@ def _make_handler(service: JarvisBackendService):
                     try:
                         text = payload.decode("utf-8")
                         self._ws_handle_text(text)
+                    except UnicodeDecodeError:
+                        _log.warning("websocket client sent invalid UTF-8 text frame")
+                    except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                        _log.debug("websocket client disconnected while handling frame")
+                        break
                     except Exception:
-                        pass
+                        _log.exception("websocket text frame handling failed")
 
         def _ws_handle_text(self, text: str) -> None:
             try:
                 data = json.loads(text)
+            except json.JSONDecodeError:
+                _log.warning("websocket client sent malformed JSON")
+                return
+            except UnicodeDecodeError:
+                _log.warning("websocket client sent invalid text encoding")
+                return
             except Exception:
+                _log.exception("websocket message parsing failed")
                 return
 
             cmd = data.get("type")
@@ -1063,7 +1085,9 @@ def _make_handler(service: JarvisBackendService):
                 header += n.to_bytes(8, "big")
             try:
                 self.connection.sendall(bytes(header) + payload)
+            except (BrokenPipeError, ConnectionResetError, socket.timeout):
+                _log.debug("websocket client disconnected during send")
             except Exception:
-                pass
+                _log.exception("websocket frame send failed")
 
     return Handler

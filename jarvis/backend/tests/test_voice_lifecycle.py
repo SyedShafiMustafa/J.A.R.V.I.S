@@ -59,6 +59,12 @@ class FailingDetector(FakeDetector):
         raise error
 
 
+class UnreportedFailingDetector(FakeDetector):
+    def start(self):
+        self.started.set()
+        raise RuntimeError("unreported detector failure")
+
+
 def make_provider(monkeypatch, detector_type=FakeDetector):
     FakeDetector.instances = []
     module = types.SimpleNamespace(WakeWordDetector=detector_type)
@@ -143,6 +149,37 @@ def test_detector_stop_closes_input_stream(monkeypatch):
     assert stream.closed
 
 
+def test_detector_callback_failure_reports_once_and_stops(monkeypatch):
+    class FakeStream:
+        callback = None
+
+        def __init__(self, **kwargs):
+            self.__class__.callback = kwargs["callback"]
+            self.stopped = False
+            self.closed = False
+
+        def start(self):
+            self.__class__.callback(np.zeros((8, 1), dtype=np.float32), 8, None, None)
+
+        def stop(self):
+            self.stopped = True
+
+        def close(self):
+            self.closed = True
+
+    errors = []
+    monkeypatch.setattr(wake_word, "Model", lambda **_: types.SimpleNamespace(
+        predict=lambda audio: (_ for _ in ()).throw(RuntimeError("predict failed"))
+    ))
+    monkeypatch.setattr(wake_word.sd, "InputStream", FakeStream)
+    detector = wake_word.WakeWordDetector(lambda: None, on_error=errors.append)
+
+    detector.start()
+
+    assert len(errors) == 1
+    assert str(errors[0]) == "predict failed"
+
+
 def test_listener_failure_cleans_resources_and_publishes_error(monkeypatch):
     provider = make_provider(monkeypatch, FailingDetector)
     events = []
@@ -157,6 +194,17 @@ def test_listener_failure_cleans_resources_and_publishes_error(monkeypatch):
         thread.name == "jarvis-wake-listener" and thread.is_alive()
         for thread in threading.enumerate()
     )
+
+
+def test_unreported_listener_failure_publishes_one_error(monkeypatch):
+    provider = make_provider(monkeypatch, UnreportedFailingDetector)
+    events = []
+    provider.bus.subscribe(events.append)
+
+    provider.start_wake_word()
+
+    assert wait_until(lambda: any(event.kind == "wake.error" for event in events))
+    assert len([event for event in events if event.kind == "wake.error"]) == 1
 
 
 class FakeAudio:
