@@ -588,6 +588,7 @@ class JarvisBackendService:
         finally:
             if self.state.status not in {STATUS_ERROR}:
                 self.state.set_status(STATUS_IDLE)
+                self._set_phase(PHASE_IDLE)
                 self.emit({"type": "status", "status": STATUS_IDLE})
 
     # ------------------------------------------------------------------
@@ -678,32 +679,20 @@ class JarvisBackendService:
                 if not self._voice_mode or self._voice_future.is_set():
                     return
 
+                # Release the wake detector's microphone before VAD capture.
+                audio.stop_wake_word()
+
                 # Wake detected - run conversation
                 self._voice_conversation(runtime)
 
                 # Conversation ended - go back to listening
                 if lifecycle.shutdown_requested:
                     return
+                if self._voice_mode and not self._voice_future.is_set():
+                    audio.start_wake_word()
         finally:
             bus.unsubscribe(on_wake)
             bus.unsubscribe(on_wake_error)
-
-    def _speak(self, audio: Any, text: str) -> None:
-        self.state.set_status(STATUS_SPEAKING)
-        self.emit({"type": "status", "status": STATUS_SPEAKING})
-        self.emit({"type": "reply", "text": text})
-        self.state.set_reply(text)
-        try:
-            audio.speak(text)
-            audio.wait()
-        except Exception as exc:
-            _log.exception("speak failed")
-            self._set_error(f"speak failed: {exc}")
-            self.emit({"type": "error", "message": f"speak failed: {exc}"})
-        finally:
-            if self.state.status not in {STATUS_ERROR}:
-                self.state.set_status(STATUS_IDLE)
-                self.emit({"type": "status", "status": STATUS_IDLE})
 
     def _on_user_interrupt(self, event: Any) -> None:
         """Handle user interrupt during TTS playback."""

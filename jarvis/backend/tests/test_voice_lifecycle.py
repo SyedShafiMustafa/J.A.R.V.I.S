@@ -256,6 +256,38 @@ class NoSpeechAudio:
         return "should not be used"
 
 
+class HandoffAudio:
+    def __init__(self, bus, future):
+        self.bus = bus
+        self.future = future
+        self.order = []
+        self.started = False
+
+    def start_wake_word(self):
+        self.started = True
+        self.order.append("wake.start")
+        threading.Timer(
+            0.01,
+            lambda: self.bus.publish(BackendEvent(kind="wake.detected")),
+        ).start()
+
+    def stop_wake_word(self):
+        self.order.append("wake.stop")
+        self.started = False
+
+    def speak(self, text):
+        self.order.append("speak")
+
+    def wait(self):
+        self.order.append("speak.wait")
+
+    def record_audio(self, cancel_event=None):
+        assert not self.started
+        self.order.append("record")
+        self.future.set()
+        raise NoSpeechError("test capture complete")
+
+
 class FakeSession:
     id = "test-session"
     conversation_id = None
@@ -319,6 +351,47 @@ def test_no_speech_returns_to_wake_without_stt():
 
     assert audio.transcribe_calls == 0
     assert service.state.snapshot()["phase"] == PHASE_WAKE_LISTENING
+
+
+def test_wake_handoff_releases_detector_before_recording():
+    bus = BackendBus()
+    future = threading.Event()
+    audio = HandoffAudio(bus, future)
+    service = JarvisBackendService()
+    service._voice_mode = True
+    service._voice_future = future
+    runtime = {
+        "audio": audio,
+        "session": FakeSession(),
+        "lifecycle": FakeLifecycle(),
+        "orchestrator": None,
+        "bus": bus,
+        "memory": FakeMemory(),
+    }
+
+    audio.start_wake_word()
+    service._wait_for_wake_and_converse(runtime)
+
+    assert audio.order.index("wake.stop") < audio.order.index("record")
+    assert audio.order.count("wake.stop") == 1
+
+
+def test_speak_sets_authoritative_speaking_phase():
+    service = JarvisBackendService()
+    observed = []
+
+    class SpeakingAudio(NoSpeechAudio):
+        def speak(self, text):
+            observed.append(service.state.snapshot())
+
+    audio = SpeakingAudio()
+    service._speak(audio, "hello")
+
+    assert observed[0]["status"] == "speaking"
+    assert observed[0]["phase"] == PHASE_SPEAKING
+    snapshot = service.state.snapshot()
+    assert snapshot["status"] == "idle"
+    assert snapshot["phase"] == PHASE_IDLE
 
 
 def test_authoritative_phase_transitions_and_state_snapshot():
