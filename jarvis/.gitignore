@@ -14,3 +14,4 @@ __pycache__/
 ._ui_serve_check2.py
 ._ui_serve_check3.py
 ._vite_runner.py
+.jarvis-launcher.lock
