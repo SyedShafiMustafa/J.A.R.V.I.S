@@ -8,11 +8,28 @@ from config.config import SAMPLE_RATE, WAKEWORD
 
 
 class WakeWordDetector:
-    def __init__(self, on_detect):
+    def __init__(self, on_detect, on_error=None, on_started=None):
         self.on_detect = on_detect
+        self.on_error = on_error
+        self.on_started = on_started
         self.model = Model(inference_framework="onnx")
         self.triggered = False
         self.busy = False
+        self._stop_event = None
+        self._stream = None
+        self._lock = threading.Lock()
+
+    def stop(self):
+        with self._lock:
+            stop_event = self._stop_event
+            stream = self._stream
+        if stop_event is not None:
+            stop_event.set()
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
 
     def _handle_detection(self):
         try:
@@ -22,8 +39,11 @@ class WakeWordDetector:
         finally:
             self.busy = False
 
-    def start(self):
+    def start(self, stop_event=None):
         print("[WAKE] Listening for 'Hey Jarvis'...")
+        stop_event = stop_event or threading.Event()
+        with self._lock:
+            self._stop_event = stop_event
 
         def callback(indata, frames, time, status):
             audio = (indata[:, 0] * 32767).astype(np.int16)
@@ -43,12 +63,37 @@ class WakeWordDetector:
             if score < 0.2:
                 self.triggered = False
 
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            blocksize=1280,
-            callback=callback,
-        ):
-            while True:
-                sd.sleep(1000)
+        try:
+            stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="float32",
+                blocksize=1280,
+                callback=callback,
+            )
+        except Exception as exc:
+            if self.on_error is not None:
+                self.on_error(exc)
+            raise
+        with self._lock:
+            self._stream = stream
+        try:
+            stream.start()
+            if self.on_started is not None:
+                self.on_started()
+            while not stop_event.wait(0.1):
+                pass
+        except Exception as exc:
+            if self.on_error is not None:
+                self.on_error(exc)
+            raise
+        finally:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+            with self._lock:
+                if self._stream is stream:
+                    self._stream = None
+                if self._stop_event is stop_event:
+                    self._stop_event = None

@@ -283,6 +283,22 @@ class JarvisBackendService:
         self._voice_mode = False
         if self._voice_future is not None:
             self._voice_future.set()
+        runtime = self._runtime
+        if runtime is not None:
+            try:
+                runtime["audio"].stop_wake_word()
+            except Exception as exc:
+                self.state.set_error(f"wake listener stop failed: {exc}")
+                self.emit({"type": "error", "message": f"wake listener stop failed: {exc}"})
+                return 500, {"error": str(exc)}
+        thread = self._voice_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=3.0)
+        if thread is not None and thread.is_alive():
+            message = "voice listener did not stop within 3 seconds"
+            self.state.set_error(message)
+            self.emit({"type": "error", "message": message})
+            return 500, {"error": message}
         return 200, {"stopped": True}
 
     def handle_command(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -497,15 +513,7 @@ class JarvisBackendService:
         try:
             runtime = self._get_runtime()
             bus = runtime["bus"]
-            audio = runtime["audio"]
             self._attach_bus_bridge(bus)
-
-            # Start wake word detection in a background thread
-            self._wake_thread = threading.Thread(
-                target=audio.start_wake_word,
-                daemon=True,
-            )
-            self._wake_thread.start()
 
             # Wait for wake events and run conversations
             self._wait_for_wake_and_converse(runtime)
@@ -519,17 +527,22 @@ class JarvisBackendService:
             self.emit({"type": "error", "message": str(exc)})
         finally:
             # Clean up wake word detection
+            cleanup_failed = False
             try:
                 runtime = self._get_runtime()
                 runtime["audio"].stop_wake_word()
-            except Exception:
-                pass
+            except Exception as exc:
+                cleanup_failed = True
+                _log.exception("wake listener cleanup failed")
+                self.state.set_error(f"wake listener cleanup failed: {exc}")
+                self.emit({"type": "error", "message": f"wake listener cleanup failed: {exc}"})
             self._voice_mode = False
             self._voice_future = None
             self._voice_thread = None
             self._wake_thread = None
-            self.state.set_status(STATUS_IDLE)
-            self.emit({"type": "status", "status": STATUS_IDLE})
+            if not cleanup_failed and self.state.snapshot()["status"] != STATUS_ERROR:
+                self.state.set_status(STATUS_IDLE)
+                self.emit({"type": "status", "status": STATUS_IDLE})
 
     def _wait_for_wake_and_converse(self, runtime: dict[str, Any]) -> None:
         """Wait for wake word, then run conversation, then repeat."""
@@ -541,11 +554,25 @@ class JarvisBackendService:
         wake_event = threading.Event()
 
         def on_wake(event):
+            if getattr(event, "kind", "") == "wake.detected":
+                wake_event.set()
+
+        def on_wake_error(event):
+            if getattr(event, "kind", "") != "wake.error":
+                return
+            error = event.meta.get("error", "wake listener failed")
+            self.state.set_error(error)
+            self.emit({"type": "error", "message": error})
+            if self._voice_future is not None:
+                self._voice_future.set()
             wake_event.set()
 
         bus.subscribe(on_wake)
+        bus.subscribe(on_wake_error)
 
         try:
+            # Subscribe before starting so an immediate listener failure is observed.
+            audio.start_wake_word()
             while self._voice_mode and not self._voice_future.is_set():
                 wake_event.clear()
                 self.state.set_status(STATUS_LISTENING)
@@ -567,6 +594,7 @@ class JarvisBackendService:
                     return
         finally:
             bus.unsubscribe(on_wake)
+            bus.unsubscribe(on_wake_error)
 
     def _speak(self, audio: Any, text: str) -> None:
         self.state.set_status(STATUS_SPEAKING)

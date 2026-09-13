@@ -20,10 +20,12 @@ Design rules:
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
 
 from backend.bus import (
+    BackendEvent,
     BackendBus,
     wake_listening,
     audio_start,
@@ -46,6 +48,8 @@ from backend.tools import (
     ToolError,
     build_default_tool_registry,
 )
+
+_log = logging.getLogger("jarvis.backend.audio")
 
 
 # ---------------------------------------------------------------------------
@@ -72,29 +76,64 @@ class LiveAudioProvider:
         self.stt = SpeechToText()
         self.tts = TextToSpeech()
         self._wake_detector = None
+        self._wake_thread = None
+        self._wake_lock = threading.Lock()
         self._session_id = session_id
         self._speaking = False
         self._barge_in_thread = None
         self._barge_in_stop = threading.Event()
 
     def start_wake_word(self) -> None:
-        if self._wake_detector is not None:
-            raise RuntimeError("Wake word detector already running")
-
         from audio.wake_word import WakeWordDetector
 
-        self._wake_detector = WakeWordDetector(on_detect=self._on_wake_detected)
-        self._wake_detector.start()
-
-        self.bus.publish(wake_listening(session_id=self._session_id))
+        with self._wake_lock:
+            if self._wake_thread is not None and self._wake_thread.is_alive():
+                return
+            detector = WakeWordDetector(
+                on_detect=self._on_wake_detected,
+                on_error=self._on_wake_error,
+                on_started=lambda: self.bus.publish(
+                    wake_listening(session_id=self._session_id)
+                ),
+            )
+            self._wake_detector = detector
+            thread = threading.Thread(
+                target=self._run_wake_detector,
+                args=(detector,),
+                name="jarvis-wake-listener",
+                daemon=True,
+            )
+            self._wake_thread = thread
+            thread.start()
 
     def stop_wake_word(self) -> None:
-        if self._wake_detector is None:
+        with self._wake_lock:
+            detector = self._wake_detector
+            thread = self._wake_thread
+        if detector is None:
             return
-
-        self._wake_detector = None
-
+        detector.stop()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        if thread is not None and thread.is_alive():
+            raise RuntimeError("wake word listener did not stop within 2 seconds")
+        with self._wake_lock:
+            if self._wake_detector is detector:
+                self._wake_detector = None
+            if self._wake_thread is thread:
+                self._wake_thread = None
         self.bus.publish(wake_listening(session_id=self._session_id, meta={"stopped": True}))
+
+    def _run_wake_detector(self, detector) -> None:
+        try:
+            detector.start()
+        except Exception:
+            _log.exception("wake word listener failed")
+        finally:
+            with self._wake_lock:
+                if self._wake_detector is detector:
+                    self._wake_detector = None
+                    self._wake_thread = None
 
     def record_audio(self) -> str:
         self.bus.publish(audio_start(session_id=self._session_id))
@@ -179,6 +218,13 @@ class LiveAudioProvider:
         # Emit wake event so the voice loop can start a conversation
         from backend.bus import wake_detected
         self.bus.publish(wake_detected(session_id=self._session_id))
+
+    def _on_wake_error(self, error: Exception) -> None:
+        self.bus.publish(BackendEvent(
+            kind="wake.error",
+            session_id=self._session_id,
+            meta={"error": str(error)},
+        ))
 
 
 # ---------------------------------------------------------------------------
