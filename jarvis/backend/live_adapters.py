@@ -82,6 +82,9 @@ class LiveAudioProvider:
         self._speaking = False
         self._barge_in_thread = None
         self._barge_in_stop = threading.Event()
+        self._barge_in_stream = None
+        self._barge_in_lock = threading.Lock()
+        self._barge_in_session = 0
 
     def start_wake_word(self) -> None:
         from audio.wake_word import WakeWordDetector
@@ -147,10 +150,16 @@ class LiveAudioProvider:
         return self.stt.transcribe(audio_path)
 
     def speak(self, text: str) -> None:
+        self._stop_barge_in()
+        with self._barge_in_lock:
+            self._barge_in_session += 1
+            session = self._barge_in_session
         self._speaking = True
         self._barge_in_stop.clear()
         self._barge_in_thread = threading.Thread(
             target=self._barge_in_listener,
+            args=(session,),
+            name="jarvis-barge-in-listener",
             daemon=True,
         )
         self._barge_in_thread.start()
@@ -158,20 +167,38 @@ class LiveAudioProvider:
 
     def wait(self) -> None:
         self._speaking = False
-        self._barge_in_stop.set()
-        if self._barge_in_thread and self._barge_in_thread.is_alive():
-            self._barge_in_thread.join(timeout=1.0)
+        self._stop_barge_in()
         self.tts.wait()
         self._speaking = False
 
     def stop_speaking(self) -> None:
         self._speaking = False
-        self._barge_in_stop.set()
-        if self._barge_in_thread and self._barge_in_thread.is_alive():
-            self._barge_in_thread.join(timeout=1.0)
+        self._stop_barge_in()
         self.tts.stop_speaking()
 
-    def _barge_in_listener(self) -> None:
+    def _stop_barge_in(self) -> None:
+        with self._barge_in_lock:
+            self._barge_in_session += 1
+            thread = self._barge_in_thread
+            stream = self._barge_in_stream
+            self._barge_in_stop.set()
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+        if thread is threading.current_thread():
+            return
+        if thread and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=1.0)
+        if thread and thread.is_alive():
+            raise RuntimeError("barge-in listener did not stop within 1 second")
+        with self._barge_in_lock:
+            if self._barge_in_thread is thread:
+                self._barge_in_thread = None
+            self._barge_in_stream = None
+
+    def _barge_in_listener(self, session: int) -> None:
         """Background VAD that listens for user speech while TTS is playing."""
         import sounddevice as sd
         import numpy as np
@@ -186,12 +213,16 @@ class LiveAudioProvider:
         started = False
         silence_count = 0
 
-        with sd.InputStream(
+        stream = sd.InputStream(
             samplerate=16000,
             channels=1,
             dtype="float32",
             callback=callback,
-        ):
+        )
+        with self._barge_in_lock:
+            self._barge_in_stream = stream
+        try:
+            stream.start()
             while self._speaking and not self._barge_in_stop.is_set():
                 try:
                     data = q.get(timeout=0.1)
@@ -208,11 +239,22 @@ class LiveAudioProvider:
                     silence_count += 1
                     if silence_count > 5:  # ~0.5s silence
                         # Speech detected - trigger interrupt
-                        if self._speaking:
+                        with self._barge_in_lock:
+                            active = self._speaking and self._barge_in_session == session
+                        if active:
                             self.bus.publish(user_interrupt(session_id=self._session_id))
                             self._speaking = False
-                            self.stop_speaking()
+                            self._stop_barge_in()
+                            self.tts.stop_speaking()
                         break
+        finally:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
+            with self._barge_in_lock:
+                if self._barge_in_stream is stream:
+                    self._barge_in_stream = None
 
     def _on_wake_detected(self) -> None:
         # Emit wake event so the voice loop can start a conversation

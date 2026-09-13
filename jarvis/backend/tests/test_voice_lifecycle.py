@@ -2,6 +2,7 @@ import threading
 import time
 import types
 
+import numpy as np
 from audio import wake_word
 from audio.vad import NoSpeechError
 from backend.bus import BackendBus, BackendEvent
@@ -302,3 +303,93 @@ def test_state_response_is_websocket_reconnect_snapshot():
 
     assert status == 200
     assert snapshot["phase"] == PHASE_TRANSCRIBING
+
+
+class FakeBargeStream:
+    streams = []
+
+    def __init__(self, **kwargs):
+        self.callback = kwargs["callback"]
+        self.started = False
+        self.stopped = False
+        self.closed = False
+        self.__class__.streams.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def close(self):
+        self.closed = True
+
+
+class FakeTts:
+    def __init__(self):
+        self.speaks = []
+        self.stops = 0
+
+    def speak(self, text):
+        self.speaks.append(text)
+
+    def wait(self):
+        pass
+
+    def stop_speaking(self):
+        self.stops += 1
+
+
+def make_audio_provider(monkeypatch):
+    FakeBargeStream.streams = []
+    monkeypatch.setattr("sounddevice.InputStream", FakeBargeStream)
+    provider = LiveAudioProvider.__new__(LiveAudioProvider)
+    provider.bus = BackendBus()
+    provider.tts = FakeTts()
+    provider._speaking = False
+    provider._barge_in_thread = None
+    provider._barge_in_stop = threading.Event()
+    provider._barge_in_stream = None
+    provider._barge_in_lock = threading.Lock()
+    provider._barge_in_session = 0
+    provider._session_id = "test-session"
+    return provider
+
+
+def test_barge_in_listener_is_single_and_stops_cleanly(monkeypatch):
+    provider = make_audio_provider(monkeypatch)
+    provider.speak("first")
+    first_thread = provider._barge_in_thread
+    provider.speak("second")
+    assert provider._barge_in_thread is not first_thread
+    provider.stop_speaking()
+    provider.stop_speaking()
+    assert provider._barge_in_thread is None
+    assert all(stream.stopped and stream.closed for stream in FakeBargeStream.streams)
+
+
+def test_barge_in_interrupts_active_session_once(monkeypatch):
+    provider = make_audio_provider(monkeypatch)
+    events = []
+    provider.bus.subscribe(events.append)
+    provider.speak("active")
+    stream = FakeBargeStream.streams[-1]
+    stream.callback(np.full((32, 1), 0.02, dtype=np.float32), 32, None, None)
+    for _ in range(6):
+        stream.callback(np.zeros((32, 1), dtype=np.float32), 32, None, None)
+    assert wait_until(lambda: len([e for e in events if e.kind == "user.interrupt"]) == 1)
+    provider.stop_speaking()
+    assert len([e for e in events if e.kind == "user.interrupt"]) == 1
+
+
+def test_barge_in_low_volume_does_not_interrupt(monkeypatch):
+    provider = make_audio_provider(monkeypatch)
+    events = []
+    provider.bus.subscribe(events.append)
+    provider.speak("quiet")
+    stream = FakeBargeStream.streams[-1]
+    for _ in range(10):
+        stream.callback(np.zeros((32, 1), dtype=np.float32), 32, None, None)
+    time.sleep(0.05)
+    assert not any(e.kind == "user.interrupt" for e in events)
+    provider.stop_speaking()
