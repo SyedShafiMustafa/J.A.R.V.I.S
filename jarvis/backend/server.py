@@ -50,6 +50,7 @@ ROOT = HERE.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from agents.ollama_errors import OllamaError
 from backend.interfaces import ToolCall
 from backend.live_runtime import RuntimeUnavailableError, build_live_runtime
 from backend.bus import (
@@ -188,6 +189,10 @@ class JarvisState:
             self.error_message = message
             self.status = STATUS_ERROR
             self.phase = PHASE_ERROR
+
+    def clear_error(self) -> None:
+        with self.lock:
+            self.error_message = None
 
     def note_user_text(self, text: str) -> None:
         with self.lock:
@@ -396,6 +401,7 @@ class JarvisBackendService:
     # ------------------------------------------------------------------
 
     def _dispatch_command(self, text: str) -> None:
+        self.state.clear_error()
         self.state.set_status(STATUS_THINKING)
         self._set_phase(PHASE_THINKING)
         self.state.note_user_text(text)
@@ -421,9 +427,9 @@ class JarvisBackendService:
             return
 
         if decision.kind == "action":
-            self.state.set_status(STATUS_EXECUTING)
-            self._set_phase(PHASE_EXECUTING)
-            self.emit({"type": "status", "status": STATUS_EXECUTING})
+            self.state.set_status(STATUS_THINKING)
+            self._set_phase(PHASE_THINKING)
+            self.emit({"type": "status", "status": STATUS_THINKING})
             self._run_action(runtime, text)
             return
 
@@ -439,7 +445,7 @@ class JarvisBackendService:
         memory = runtime["memory"]
 
         conversation_id = session.conversation_id
-        self._set_phase(PHASE_EXECUTING)
+        self._set_phase(PHASE_THINKING)
 
         # Save user message
         if conversation_id:
@@ -451,16 +457,24 @@ class JarvisBackendService:
             task = orchestrator.plan_action(text)
         except Exception as exc:
             _log.exception("planning failed")
-            message = "I couldn't plan that task. Please check that Ollama is running."
-            self._set_error(f"planning failed: {exc}")
-            self.emit({"type": "error", "message": f"planning failed: {exc}"})
+            message = getattr(
+                exc,
+                "user_message",
+                "I couldn't safely plan that task. Please try again.",
+            )
+            self._set_error(message)
+            self.emit({"type": "error", "message": message})
             self._speak(audio, message)
+            self._set_error(message)
             if conversation_id:
                 memory.save_message(conversation_id, "assistant", message)
                 memory.maybe_summarize(conversation_id)
             return
 
         session.active_task = task
+        self.state.set_status(STATUS_EXECUTING)
+        self._set_phase(PHASE_EXECUTING)
+        self.emit({"type": "status", "status": STATUS_EXECUTING})
         bus.publish(task_started(task, session_id=session.id))
         task.start()
 
@@ -520,9 +534,18 @@ class JarvisBackendService:
         ]
 
         full_reply = ""
-        for sentence in brain.stream(messages):
-            full_reply += sentence + " "
-            self._speak(audio, sentence)
+        try:
+            for sentence in brain.stream(messages):
+                full_reply += sentence + " "
+                self._speak(audio, sentence)
+        except OllamaError as exc:
+            _log.exception("brain request failed")
+            message = exc.user_message
+            self._set_error(message)
+            self.emit({"type": "error", "message": message})
+            self._speak(audio, message)
+            self._set_error(message)
+            return
 
         reply = full_reply.strip()
         if reply:

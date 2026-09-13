@@ -1,7 +1,8 @@
 import json
-import requests
 
 from config.config import OLLAMA_URL, OLLAMA_MODEL
+from agents.ollama_client import post_with_retries
+from agents.ollama_errors import OllamaError, OllamaMalformedResponseError, PlannerValidationError
 
 
 SYSTEM_PROMPT = """
@@ -181,16 +182,76 @@ class TaskPlanner:
         }
 
         try:
-            response = requests.post(self.url, json=payload)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            raise RuntimeError(f"Ollama not reachable ({e}) — is it running?")
+            response = post_with_retries(self.url, json=payload, stream=False)
+        except OllamaError:
+            raise
 
-        content = response.json()["message"]["content"].strip()
+        try:
+            content = response.json()["message"]["content"].strip()
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise OllamaMalformedResponseError("invalid Ollama planner response") from exc
+        finally:
+            response.close()
 
         # Remove markdown if Ollama adds it
         if content.startswith("```"):
-            content = content.split("\n", 1)[1]
-            content = content.rsplit("```", 1)[0].strip()
+            try:
+                content = content.split("\n", 1)[1]
+                content = content.rsplit("```", 1)[0].strip()
+            except IndexError as exc:
+                raise PlannerValidationError("planner returned malformed markdown") from exc
 
-        return json.loads(content)
+        try:
+            plan = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise PlannerValidationError("planner returned malformed JSON") from exc
+        self._validate_plan(plan)
+        return plan
+
+    @staticmethod
+    def _validate_plan(plan: object) -> None:
+        if not isinstance(plan, dict):
+            raise PlannerValidationError("planner output must be an object")
+        if set(plan) - {"goal", "steps"}:
+            raise PlannerValidationError("planner output contains unexpected fields")
+        if not isinstance(plan.get("goal"), str) or not plan["goal"].strip():
+            raise PlannerValidationError("planner goal must be a non-empty string")
+        steps = plan.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise PlannerValidationError("planner steps must be a non-empty array")
+
+        schemas = {
+            "open_app": {"app": str},
+            "wait_window": {"title": str},
+            "click_text": {"text": str},
+            "type": {"text": str},
+            "press": {"key": str},
+            "hotkey": {"keys": list},
+            "close_app": {"app": str},
+            "open_youtube": {},
+            "search_youtube": {"query": str},
+            "search_google": {"query": str},
+        }
+        for step in steps:
+            if not isinstance(step, dict) or not isinstance(step.get("tool"), str):
+                raise PlannerValidationError("planner action must be an object with a tool")
+            tool = step["tool"]
+            if tool not in schemas:
+                raise PlannerValidationError(f"planner returned invalid tool: {tool}")
+            expected = schemas[tool]
+            if set(step) - {"tool", *expected}:
+                raise PlannerValidationError("planner action contains unexpected fields")
+            if set(expected) - set(step):
+                raise PlannerValidationError(f"planner action missing fields for {tool}")
+            for field, field_type in expected.items():
+                value = step[field]
+                if field_type is list:
+                    valid = (
+                        isinstance(value, list)
+                        and bool(value)
+                        and all(isinstance(item, str) and item.strip() for item in value)
+                    )
+                else:
+                    valid = isinstance(value, field_type) and bool(value.strip())
+                if not valid:
+                    raise PlannerValidationError(f"planner field {field} has an invalid type or value")

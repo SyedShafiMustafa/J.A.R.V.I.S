@@ -27,6 +27,9 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")      # "ollama" or "openai"
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "30"))
+OLLAMA_MAX_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
+OLLAMA_RETRY_DELAY = float(os.getenv("OLLAMA_RETRY_DELAY", "0.25"))
 
 # --- Speech-to-text ---
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")   # tiny / base / medium / large-v3-turbo

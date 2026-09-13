@@ -122,7 +122,7 @@ def _warm_up_models(audio, brain):
         _log.info("Warming up Whisper STT...")
         audio.stt.transcribe("")  # No-op to trigger model load
     except Exception:
-        pass  # Empty audio may fail, but model is loaded
+        _log.warning("Whisper warm-up failed", exc_info=True)
 
     # Warm up Piper TTS
     try:
@@ -130,14 +130,14 @@ def _warm_up_models(audio, brain):
         audio.tts.speak(" ")
         audio.tts.wait()
     except Exception:
-        pass
+        _log.warning("Piper warm-up failed", exc_info=True)
 
     # Warm up Ollama connection
     try:
         _log.info("Warming up Ollama connection...")
         list(brain.stream([{"role": "user", "content": "Hello"}]))  # Trigger connection
     except Exception:
-        pass
+        _log.warning("Ollama warm-up failed; startup will continue lazily", exc_info=True)
 
 
 # Convenience alias so callers can inject a fake builder in tests.

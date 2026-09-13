@@ -2,6 +2,8 @@ import json
 import requests
 
 from config.config import OLLAMA_URL, OLLAMA_MODEL
+from agents.ollama_client import post_with_retries
+from agents.ollama_errors import OllamaMalformedResponseError, OllamaError
 
 
 class JarvisBrain:
@@ -25,52 +27,45 @@ class JarvisBrain:
         }
 
         try:
-            response = requests.post(
+            response = post_with_retries(
                 self.url.replace("/generate", "/chat"),
                 json=payload,
-                stream=True
+                stream=True,
             )
-            response.raise_for_status()
-        except requests.RequestException as e:
-            print(f"❌ Ollama error: {e}")
-            yield "I'm having trouble reaching my brain. Please check that Ollama is running."
-            return
+        except OllamaError:
+            raise
 
         buffer = ""
-
-        for line in response.iter_lines():
-
-            if not line:
-                continue
-
-            try:
-                data = json.loads(line.decode())
-            except json.JSONDecodeError:
-                continue
-
-            token = data.get("message", {}).get("content", "")
-
-            buffer += token
-
-            while True:
-
-                idx = max(
-                    buffer.rfind(". "),
-                    buffer.rfind("? "),
-                    buffer.rfind("! ")
-                )
-
-                if idx == -1:
-                    break
-
-                sentence = buffer[:idx + 1].strip()
-                buffer = buffer[idx + 2:]
-
-                if sentence:
-                    yield sentence
-
-        if buffer.strip():
-            yield buffer.strip()
+        try:
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line.decode())
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise OllamaMalformedResponseError("invalid Ollama stream data") from exc
+                token = data.get("message", {}).get("content", "")
+                if not isinstance(token, str):
+                    raise OllamaMalformedResponseError("invalid Ollama token")
+                buffer += token
+                while True:
+                    idx = max(buffer.rfind(". "), buffer.rfind("? "), buffer.rfind("! "))
+                    if idx == -1:
+                        break
+                    sentence = buffer[:idx + 1].strip()
+                    buffer = buffer[idx + 2:]
+                    if sentence:
+                        yield sentence
+            if buffer.strip():
+                yield buffer.strip()
+        except requests.Timeout as exc:
+            from agents.ollama_errors import OllamaTimeoutError
+            raise OllamaTimeoutError("Ollama stream timed out") from exc
+        except requests.ConnectionError as exc:
+            from agents.ollama_errors import OllamaUnavailableError
+            raise OllamaUnavailableError("Ollama stream disconnected") from exc
+        finally:
+            response.close()
 
     def ask(self, messages: list[dict]):
         return " ".join(self.stream(messages))

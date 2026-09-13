@@ -14,6 +14,9 @@ from config.settings import (
     LLM_PROVIDER,          # "ollama" or "openai"
     OLLAMA_MODEL,          # from .env, defaults to qwen2.5:3b
     OLLAMA_URL,            # Ollama/Qwen provider endpoint (from .env)
+    OLLAMA_TIMEOUT,
+    OLLAMA_MAX_RETRIES,
+    OLLAMA_RETRY_DELAY,
     OPENAI_API_KEY,
     TTS_PROVIDER,
     MEMORY_DB_PATH,        # absolute — no more CWD-dependent paths
