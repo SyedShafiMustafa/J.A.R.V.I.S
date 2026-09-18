@@ -241,6 +241,7 @@ class JarvisBackendService:
         self._voice_mode = False
         self._voice_thread: threading.Thread | None = None
         self._voice_future: threading.Event | None = None
+        self._listen_start_lock = threading.Lock()
         self._runtime: dict[str, Any] | None = None
         self._runtime_lock = threading.Lock()
         self._started = False
@@ -331,6 +332,27 @@ class JarvisBackendService:
         self._voice_thread = threading.Thread(target=self._run_voice_loop, daemon=True)
         self._voice_thread.start()
         return 200, {"started": True}
+
+    def ensure_listening(self) -> tuple[bool, str | None]:
+        """Idempotently start the wake-listening voice loop.
+
+        Used for automatic startup: the backend starts listening right
+        after the runtime is ready, without waiting for the user to press
+        "Start Listening".
+
+        Returns (ok, error_message); error_message is None on success.
+        Safe to call multiple times and from multiple threads: only the
+        first call starts the listener, duplicate calls are ignored, and
+        the existing wake→VAD handoff lifecycle is preserved (the loop
+        itself restarts the wake listener between conversations).
+        """
+        with self._listen_start_lock:
+            if self._voice_mode:
+                return True, None
+            code, payload = self.start_listening()
+            if code == 200:
+                return True, None
+            return False, str(payload.get("error") or "failed to start listening")
 
     def stop_listening(self) -> tuple[int, dict[str, Any]]:
         if not self._voice_mode:

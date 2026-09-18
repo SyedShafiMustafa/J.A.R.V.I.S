@@ -51,6 +51,16 @@ def main() -> None:
         print("[api] note: the UI will still work; commands will report a clean 503")
     else:
         print("[api] live runtime ready")
+        # Automatic wake listening: activate the existing voice loop as soon
+        # as the runtime is healthy, without waiting for a UI button press.
+        # ensure_listening is idempotent; failures are reported but do not
+        # take the backend down (the UI can still start listening manually).
+        ok, auto_error = service.ensure_listening()
+        if ok:
+            print("[api] wake listener started automatically; waiting for 'Hey Jarvis'")
+        else:
+            print(f"[api] note: automatic wake listener failed to start ({auto_error})")
+            print("[api] note: use the central J control or Start Listening to retry")
 
     print("[api] ready")
     print("[api] endpoints:")

@@ -9,6 +9,9 @@ Usage:
     python launcher.py [--no-browser]
 
 Behavior:
+    - checks the local Ollama API and starts 'ollama serve' when it is
+      not reachable yet; an already-running Ollama is reused and left
+      running on shutdown (the launcher only stops what it started)
     - starts the backend service on a free port
     - starts the UI dev server on a free port, pointed at that backend
     - waits for both to become reachable (real HTTP status, not 200-masquerading-errors)
@@ -36,6 +39,9 @@ UI_DIR = HERE / "ui"
 BACKEND_API = HERE / "backend" / "api.py"
 LOGS_DIR = HERE / "logs"
 LOCK_PATH = HERE / ".jarvis-launcher.lock"
+
+OLLAMA_URL = "http://127.0.0.1:11434"
+OLLAMA_READY_TIMEOUT_SEC = 120
 
 
 class LauncherLock:
@@ -118,6 +124,100 @@ def wait_for_url(
     return False
 
 
+def ollama_is_ready(url: str = OLLAMA_URL, timeout_sec: float = 2.0) -> bool:
+    """True when an Ollama API answers /api/tags at the given URL."""
+    try:
+        req = urllib.request.Request(f"{url}/api/tags")
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def wait_for_ollama(
+    url: str = OLLAMA_URL,
+    timeout_sec: int = OLLAMA_READY_TIMEOUT_SEC,
+    process: subprocess.Popen | None = None,
+) -> bool:
+    """Poll the Ollama API until it is ready, the process exits, or timeout."""
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if process is not None and process.poll() is not None:
+            return False
+        if ollama_is_ready(url):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def locate_ollama_executable() -> str | None:
+    """Find the existing local Ollama installation, without hardcoding paths.
+
+    Prefers whatever 'ollama' is on PATH, then falls back to the standard
+    per-user Windows install location. Returns None when not found.
+    """
+    exe = shutil.which("ollama")
+    if exe:
+        return exe
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
+        candidate = Path(local_app) / "Programs" / "Ollama" / "ollama.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def ensure_ollama_running(url: str = OLLAMA_URL) -> tuple[subprocess.Popen | None, object | None]:
+    """Guarantee an Ollama API is reachable before the backend starts.
+
+    - If the API already answers, reuse it: returns (None, None) so the
+      launcher knows it does NOT own the process and must never kill it.
+    - Otherwise start the existing local 'ollama serve' installation and
+      wait for readiness.
+
+    Returns (process, log_handle); process is None when reusing an
+    already-running Ollama. Raises RuntimeError with an actionable
+    message when Ollama cannot be made ready.
+    """
+    if ollama_is_ready(url):
+        print("[launcher] ollama already running; reusing it")
+        return None, None
+
+    exe = locate_ollama_executable()
+    if exe is None:
+        raise RuntimeError(
+            "Ollama is not reachable and the 'ollama' executable was not found. "
+            "Install Ollama (https://ollama.com) or add it to PATH, then either "
+            "start it manually with 'ollama serve' or relaunch J.A.R.V.I.S."
+        )
+
+    print(f"[launcher] ollama not reachable; starting '{exe} serve'...")
+    log_handle = open(LOGS_DIR / "ollama.log", "w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            [exe, "serve"],
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    except OSError as exc:
+        log_handle.close()
+        raise RuntimeError(f"failed to start '{exe} serve': {exc}") from exc
+
+    if not wait_for_ollama(url, process=proc):
+        if proc.poll() is None:
+            proc.terminate()
+        log_handle.close()
+        print("[launcher] ollama.log tail:\n" + tail(LOGS_DIR / "ollama.log"))
+        raise RuntimeError(
+            f"Ollama did not become ready at {url} within {OLLAMA_READY_TIMEOUT_SEC}s. "
+            "Check logs/ollama.log, then try starting it manually with 'ollama serve'."
+        )
+
+    print("[launcher] ollama ready")
+    return proc, log_handle
+
+
 def tail(path: Path, n: int = 30) -> str:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -143,8 +243,10 @@ def run(no_browser: bool = False) -> None:
 
     backend_proc = None
     ui_proc = None
+    ollama_proc = None
     backend_log = None
     ui_log = None
+    ollama_log = None
     try:
         LOGS_DIR.mkdir(exist_ok=True)
         backend_port = find_free_port()
@@ -153,6 +255,8 @@ def run(no_browser: bool = False) -> None:
 
         print(f"[launcher] backend port: {backend_port}")
         print(f"[launcher] ui port: {ui_port}")
+
+        ollama_proc, ollama_log = ensure_ollama_running()
 
         backend_log = open(LOGS_DIR / "backend.log", "w", encoding="utf-8")
         ui_log = open(LOGS_DIR / "ui.log", "w", encoding="utf-8")
@@ -207,12 +311,31 @@ def run(no_browser: bool = False) -> None:
             print("\n[launcher] shutting down...")
     finally:
         _terminate(backend_proc, ui_proc)
+        _stop_owned_ollama(ollama_proc)
         if backend_log is not None:
             backend_log.close()
         if ui_log is not None:
             ui_log.close()
+        if ollama_log is not None:
+            ollama_log.close()
         lock.release()
         print("[launcher] stopped")
+
+
+def _stop_owned_ollama(ollama_proc: subprocess.Popen | None) -> None:
+    """Stop Ollama only when the launcher started it.
+
+    An already-running Ollama that was reused is never represented by a
+    process handle here, so it is left running across launcher shutdown.
+    """
+    if ollama_proc is None or ollama_proc.poll() is not None:
+        return
+    ollama_proc.terminate()
+    try:
+        ollama_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        ollama_proc.kill()
+        ollama_proc.wait(timeout=5)
 
 
 def _terminate(*procs: subprocess.Popen | None) -> None:

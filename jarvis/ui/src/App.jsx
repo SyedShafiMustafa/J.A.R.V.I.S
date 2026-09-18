@@ -283,11 +283,20 @@ export default function App() {
 
           <section className={`core-panel core-${visiblePhase}`}>
             <div className="core-kicker">JARVIS / CORE PROCESSOR</div>
-            <div className="core-visual" aria-label={activeStatus.label}>
+            <button
+              type="button"
+              className="core-visual"
+              data-listening={listening}
+              data-error={visiblePhase === 'ERROR'}
+              onClick={toggleListening}
+              aria-label={`${activeStatus.label} — click to ${listening ? 'stop' : 'start'} listening`}
+              title={listening ? 'Stop listening' : 'Start listening'}
+            >
               <div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="orbit orbit-three" />
               <div className="core-ticks">{Array.from({ length: 18 }, (_, i) => <i key={i} style={{ transform: `rotate(${i * 20}deg)` }} />)}</div>
               <div className="core-glow"><span>J</span></div>
-            </div>
+              <div className="core-phase">{activeStatus.label}</div>
+            </button>
             <div className="core-status">
               <span className="status-mark">●</span>
               <strong>{activeStatus.label}</strong>
@@ -320,13 +329,14 @@ export default function App() {
           <section className="command-dock">
             <button className="talk-button" data-listening={listening} onClick={toggleListening} aria-label={listening ? 'Stop listening' : 'Talk to Jarvis'}>
               <span className="talk-symbol">{listening ? '■' : '◉'}</span>
-              <span>{listening ? 'STOP LISTENING' : 'TALK TO JARVIS'}</span>
+              <span>{listening ? 'STOP LISTENING' : 'START LISTENING'}</span>
             </button>
             <div className="command-input-wrap">
               <span className="input-prefix">&gt;</span>
               <input ref={inputRef} className="command-input" placeholder="Enter a text command..." value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} disabled={sending} />
               <button className="send-button" onClick={handleSend} disabled={!input.trim() || sending}>{sending ? '...' : 'TRANSMIT'}</button>
             </div>
+            <div className="dock-hint">CENTRAL J // PRIMARY VOICE CONTROL — CLICK THE J TO TOGGLE LISTENING</div>
             {errorMessage && <div className="error-banner"><span>{errorMessage}</span><button className="error-dismiss" onClick={() => setErrorMessage('')}>DISMISS</button></div>}
           </section>
         </main>
@@ -432,6 +442,20 @@ const styles = `
   .send-button:disabled { color: var(--muted); cursor: not-allowed; opacity: .55; }
   .error-banner { grid-column: 1 / -1; border: 1px solid var(--danger); color: var(--danger); padding: 10px 12px; font-size: 11px; display: flex; justify-content: space-between; }
   .error-dismiss { border: 0; background: transparent; color: inherit; cursor: pointer; }
+  /* central J = primary voice control */
+  button.core-visual { background: none; border: 0; padding: 0; cursor: pointer; }
+  button.core-visual:focus-visible { outline: 2px solid var(--cyan); outline-offset: 8px; border-radius: 50%; }
+  .core-visual:hover .core-glow { box-shadow: 0 0 30px rgba(84,229,232,.9), 0 0 90px rgba(84,229,232,.3); }
+  .core-visual[data-error='true'] .core-glow { border-color: var(--danger); }
+  .core-visual[data-error='true'] .core-glow span { color: var(--danger); text-shadow: 0 0 15px var(--danger); }
+  .core-phase { position: absolute; bottom: 4%; left: 50%; transform: translateX(-50%); border: 1px solid var(--line); background: rgba(8, 20, 25, .9); color: var(--cyan); font-size: 9px; letter-spacing: 1.5px; padding: 5px 11px; white-space: nowrap; z-index: 3; }
+  .core-visual[data-listening='true'] .core-phase { border-color: var(--cyan); box-shadow: 0 0 12px rgba(84,229,232,.35); }
+  .core-visual[data-error='true'] .core-phase { color: var(--danger); border-color: var(--danger); }
+  /* bottom voice control demoted to fallback */
+  .talk-button { border-color: var(--line); color: var(--muted); }
+  .talk-button:hover { background: rgba(84,229,232,.06); }
+  .talk-button[data-listening='true'] { border-color: var(--danger); color: var(--danger); }
+  .dock-hint { grid-column: 1 / -1; color: var(--muted); font-size: 9px; letter-spacing: 1.5px; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes spin-reverse { to { transform: rotate(-360deg); } }
   @keyframes pulse { 50% { transform: scale(1.08); opacity: .75; } }
