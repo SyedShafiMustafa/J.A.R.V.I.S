@@ -3,6 +3,8 @@ import time
 import types
 
 import numpy as np
+import pytest
+
 from audio import wake_word
 from audio.vad import NoSpeechError
 from backend.bus import BackendBus, BackendEvent
@@ -477,40 +479,74 @@ def make_audio_provider(monkeypatch):
     return provider
 
 
+@pytest.fixture()
+def fake_barge_scorer(monkeypatch):
+    """Score every barge-in audio block as a wake-phrase detection."""
+    class FakeScorer:
+        def predict(self, audio):
+            return {"hey_jarvis": 0.9}
+
+    monkeypatch.setattr(
+        "backend.live_adapters._make_barge_in_model",
+        lambda: FakeScorer(),
+    )
+
+
+@pytest.fixture()
+def fake_barge_scorer_below_threshold(monkeypatch):
+    """Score every barge-in audio block below the wake threshold."""
+    class FakeScorer:
+        def predict(self, audio):
+            return {"hey_jarvis": 0.1}
+
+    monkeypatch.setattr(
+        "backend.live_adapters._make_barge_in_model",
+        lambda: FakeScorer(),
+    )
+
+
 def test_barge_in_listener_is_single_and_stops_cleanly(monkeypatch):
     provider = make_audio_provider(monkeypatch)
     provider.speak("first")
+    assert provider._barge_in_thread is None  # not started until playback begins
+    session = provider._barge_in_session
+    provider._start_barge_in_listener(session)
     first_thread = provider._barge_in_thread
-    provider.speak("second")
-    assert provider._barge_in_thread is not first_thread
+    provider._start_barge_in_listener(session + 1)  # stale session -> ignored
+    assert provider._barge_in_thread is first_thread
     provider.stop_speaking()
     provider.stop_speaking()
     assert provider._barge_in_thread is None
     assert all(stream.stopped and stream.closed for stream in FakeBargeStream.streams)
 
 
-def test_barge_in_interrupts_active_session_once(monkeypatch):
+def test_barge_in_interrupts_active_session_once(monkeypatch, fake_barge_scorer):
     provider = make_audio_provider(monkeypatch)
     events = []
     provider.bus.subscribe(events.append)
     provider.speak("active")
+    provider._start_barge_in_listener(provider._barge_in_session)
     stream = FakeBargeStream.streams[-1]
-    stream.callback(np.full((32, 1), 0.02, dtype=np.float32), 32, None, None)
-    for _ in range(6):
-        stream.callback(np.zeros((32, 1), dtype=np.float32), 32, None, None)
+    # Wake phrase heard once -> exactly one interrupt, playback stopped.
+    stream.callback(np.zeros((1280, 1), dtype=np.float32), 1280, None, None)
     assert wait_until(lambda: len([e for e in events if e.kind == "user.interrupt"]) == 1)
     provider.stop_speaking()
     assert len([e for e in events if e.kind == "user.interrupt"]) == 1
+    # one stop from the interrupt path, one from the explicit stop above
+    assert provider.tts.stops == 2
 
 
-def test_barge_in_low_volume_does_not_interrupt(monkeypatch):
+def test_barge_in_non_wake_audio_does_not_interrupt(monkeypatch, fake_barge_scorer_below_threshold):
     provider = make_audio_provider(monkeypatch)
     events = []
     provider.bus.subscribe(events.append)
     provider.speak("quiet")
+    provider._start_barge_in_listener(provider._barge_in_session)
     stream = FakeBargeStream.streams[-1]
+    # Loud non-wake audio (e.g. the assistant's own voice or background
+    # noise) must NOT trigger an interrupt anymore.
     for _ in range(10):
-        stream.callback(np.zeros((32, 1), dtype=np.float32), 32, None, None)
+        stream.callback(np.full((1280, 1), 0.02, dtype=np.float32), 1280, None, None)
     time.sleep(0.05)
     assert not any(e.kind == "user.interrupt" for e in events)
     provider.stop_speaking()

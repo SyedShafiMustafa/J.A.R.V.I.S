@@ -87,10 +87,16 @@ class VoiceRecorder:
 
                 volume = np.abs(audio).mean()
 
+                # Speech-start accumulator: sustained speech fills one block
+                # at a time (same onset confirmation as before), but brief
+                # dips (word gaps) decay instead of erasing progress. Natural
+                # speech rarely holds 12 *consecutive* loud blocks — with a
+                # hard reset the trigger often never fires at all and the
+                # utterance is lost entirely.
                 if volume > 0.015:
                     speech_frames += 1
                 else:
-                    speech_frames = 0
+                    speech_frames = max(speech_frames - 1, 0)
 
                 if not started and speech_frames >= self.speech_start_frames:
                     started = True

@@ -113,14 +113,40 @@ def build_live_runtime(
 
 
 def _warm_up_models(audio, brain):
-    """Pre-load models to avoid cold-start latency on first conversation."""
+    """Pre-load models so the microphone and first reply are ready fast.
+
+    Whisper and Piper are warmed synchronously: they are pure local model
+    loads, they gate microphone readiness (WakeWordDetector is constructed
+    right after this), and doing them here removes their cost from the
+    first real turn.
+
+    The Ollama warm-up ("Hello" round-trip) runs in a daemon thread: it is
+    only a keep-alive/first-load optimization for the brain, and blocking
+    runtime construction on it delays wake-listener startup by seconds
+    (worse when the model needs to load from disk on CPU).
+    """
     import logging
+    import tempfile
+    import threading
+
+    import numpy as np
+    import soundfile as sf
+
     _log = logging.getLogger("jarvis.runtime")
 
-    # Warm up Whisper (STT)
+    # Warm up Whisper (STT) with a real 16 kHz WAV so the first actual
+    # transcription does not pay lazy per-process initialization cost.
+    # (The previous transcribe("") no-op never exercised the decode path.)
     try:
         _log.info("Warming up Whisper STT...")
-        audio.stt.transcribe("")  # No-op to trigger model load
+        silence = np.zeros(16000, dtype=np.float32)
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        try:
+            sf.write(tmp.name, silence, 16000)
+            audio.stt.transcribe(tmp.name)
+        finally:
+            tmp.close()
+        _log.info("Whisper STT warm-up complete")
     except Exception:
         _log.warning("Whisper warm-up failed", exc_info=True)
 
@@ -132,12 +158,15 @@ def _warm_up_models(audio, brain):
     except Exception:
         _log.warning("Piper warm-up failed", exc_info=True)
 
-    # Warm up Ollama connection
-    try:
-        _log.info("Warming up Ollama connection...")
-        list(brain.stream([{"role": "user", "content": "Hello"}]))  # Trigger connection
-    except Exception:
-        _log.warning("Ollama warm-up failed; startup will continue lazily", exc_info=True)
+    # Warm up Ollama connection without blocking startup.
+    def _warm_ollama():
+        try:
+            list(brain.stream([{"role": "user", "content": "Hello"}]))
+            _log.info("Ollama warm-up complete")
+        except Exception:
+            _log.warning("Ollama warm-up failed; startup will continue lazily", exc_info=True)
+
+    threading.Thread(target=_warm_ollama, name="jarvis-ollama-warmup", daemon=True).start()
 
 
 # Convenience alias so callers can inject a fake builder in tests.

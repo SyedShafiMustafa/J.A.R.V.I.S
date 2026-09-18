@@ -20,6 +20,10 @@ class TextToSpeech:
         self._current_stream = None
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
+        # Optional callback invoked from the worker thread the moment audio
+        # playback actually starts (used to time the barge-in listener so it
+        # never runs during synthesis or before the speakers are live).
+        self.on_playback_start = None
 
         self.worker = threading.Thread(target=self._speaker_loop, daemon=True)
         self.worker.start()
@@ -52,6 +56,13 @@ class TextToSpeech:
                         self._current_stream = stream
                     try:
                         stream.start()
+                        hook = getattr(self, "on_playback_start", None)
+                        if hook is not None:
+                            try:
+                                hook()
+                            except Exception:
+                                # A broken hook must never kill speech output.
+                                pass
                         stream.write(audio)
                         chunk_duration = len(audio) / self.sample_rate
                         elapsed = 0.0

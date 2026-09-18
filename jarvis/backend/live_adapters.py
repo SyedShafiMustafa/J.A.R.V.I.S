@@ -52,6 +52,17 @@ from backend.tools import (
 _log = logging.getLogger("jarvis.backend.audio")
 
 
+def _make_barge_in_model():
+    """Factory for the barge-in wake-word scorer.
+
+    Module-level seam so tests can substitute a fake scorer without
+    loading the real openwakeword ONNX models.
+    """
+    from openwakeword.model import Model
+
+    return Model(inference_framework="onnx")
+
+
 # ---------------------------------------------------------------------------
 # ADAPTER: existing audio stack -> AudioProvider
 # ---------------------------------------------------------------------------
@@ -162,14 +173,32 @@ class LiveAudioProvider:
             session = self._barge_in_session
         self._speaking = True
         self._barge_in_stop.clear()
-        self._barge_in_thread = threading.Thread(
-            target=self._barge_in_listener,
-            args=(session,),
-            name="jarvis-barge-in-listener",
-            daemon=True,
-        )
-        self._barge_in_thread.start()
+        # The barge-in mic starts only when TTS audio actually reaches the
+        # speakers (via the on_playback_start hook), never during synthesis —
+        # otherwise the listener hears silence/queue lag and can outlive or
+        # preempt the utterance it is meant to guard.
+        self.tts.on_playback_start = lambda: self._start_barge_in_listener(session)
         self.tts.speak(text)
+
+    def _start_barge_in_listener(self, session: int) -> None:
+        """Start the barge-in mic listener; called from the TTS worker thread
+        the moment playback actually begins."""
+        with self._barge_in_lock:
+            stale = (
+                self._barge_in_session != session
+                or not self._speaking
+                or self._barge_in_stop.is_set()
+            )
+            if stale:
+                return
+            thread = threading.Thread(
+                target=self._barge_in_listener,
+                args=(session,),
+                name="jarvis-barge-in-listener",
+                daemon=True,
+            )
+            self._barge_in_thread = thread
+        thread.start()
 
     def wait(self) -> None:
         self._speaking = False
@@ -195,34 +224,48 @@ class LiveAudioProvider:
                 stream.close()
         if thread is threading.current_thread():
             return
-        if thread and thread is not threading.current_thread() and thread.is_alive():
-            thread.join(timeout=1.0)
-        if thread and thread.is_alive():
-            raise RuntimeError("barge-in listener did not stop within 1 second")
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        if thread is not None and thread.is_alive():
+            # A slow PortAudio stop must not fail the whole speaking turn;
+            # the listener is session-invalidated and will exit on its own.
+            _log.warning("barge-in listener slow to stop; continuing")
         with self._barge_in_lock:
             if self._barge_in_thread is thread:
                 self._barge_in_thread = None
-            self._barge_in_stream = None
+            if self._barge_in_stream is stream:
+                self._barge_in_stream = None
 
     def _barge_in_listener(self, session: int) -> None:
-        """Background VAD that listens for user speech while TTS is playing."""
+        """Listen for the wake phrase while TTS is playing and interrupt it.
+
+        Uses wake-word detection instead of raw loudness: an energy trigger
+        hears the assistant's own voice through the speakers and
+        self-interrupts every reply. The wake phrase is an intentional
+        user gesture that the TTS audio itself never matches.
+        """
         import sounddevice as sd
         import numpy as np
         import queue
+
+        from config.config import SAMPLE_RATE, WAKEWORD
 
         q = queue.Queue()
 
         def callback(indata, frames, time, status):
             q.put(indata.copy())
 
-        silence_threshold = 0.01
-        started = False
-        silence_count = 0
+        try:
+            model = _make_barge_in_model()
+        except Exception as exc:
+            _log.warning("barge-in wake model unavailable; interrupt disabled for this turn: %s", exc)
+            return
 
         stream = sd.InputStream(
-            samplerate=16000,
+            samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
+            blocksize=1280,
             callback=callback,
         )
         with self._barge_in_lock:
@@ -235,24 +278,21 @@ class LiveAudioProvider:
                 except queue.Empty:
                     continue
 
-                audio = data.flatten()
-                volume = np.abs(audio).mean()
+                audio = (data[:, 0] * 32767).astype(np.int16)
+                try:
+                    score = model.predict(audio).get(WAKEWORD, 0.0)
+                except Exception:
+                    continue
 
-                if volume > silence_threshold:
-                    started = True
-                    silence_count = 0
-                elif started:
-                    silence_count += 1
-                    if silence_count > 5:  # ~0.5s silence
-                        # Speech detected - trigger interrupt
-                        with self._barge_in_lock:
-                            active = self._speaking and self._barge_in_session == session
-                        if active:
-                            self.bus.publish(user_interrupt(session_id=self._session_id))
-                            self._speaking = False
-                            self._stop_barge_in()
-                            self.tts.stop_speaking()
-                        break
+                if score > 0.5:
+                    with self._barge_in_lock:
+                        active = self._speaking and self._barge_in_session == session
+                    if active:
+                        self._speaking = False
+                        self._barge_in_stop.set()
+                        self.bus.publish(user_interrupt(session_id=self._session_id))
+                        self.tts.stop_speaking()
+                    break
         finally:
             try:
                 stream.stop()

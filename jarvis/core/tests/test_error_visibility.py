@@ -55,6 +55,11 @@ def test_optional_warmup_failure_is_logged_and_recoverable(monkeypatch, caplog):
     _warm_up_models(Audio(), Brain())
     assert "Whisper warm-up failed" in caplog.text
     assert "Piper warm-up failed" in caplog.text
+    # The Ollama warm-up is fire-and-forget; wait for its thread to log.
+    import time as _time
+    limit = _time.monotonic() + 5
+    while "Ollama warm-up failed" not in caplog.text and _time.monotonic() < limit:
+        _time.sleep(0.05)
     assert "Ollama warm-up failed" in caplog.text
 
 
