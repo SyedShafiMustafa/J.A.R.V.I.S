@@ -1,4 +1,6 @@
 import queue
+from collections import deque
+
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
@@ -25,12 +27,17 @@ class RecordingCancelledError(RecordingOutcomeError):
 
 class VoiceRecorder:
 
-    def __init__(self, max_duration=30.0, speech_wait_timeout=5.0, speech_start_frames=12):
+    def __init__(self, max_duration=30.0, speech_wait_timeout=5.0, speech_start_frames=12,
+                 pre_buffer_seconds=1.0):
         self.sample_rate = 16000
         self.channels = 1
         self.max_duration = max_duration
         self.speech_wait_timeout = speech_wait_timeout
         self.speech_start_frames = speech_start_frames
+        # Audio captured just before speech is confirmed is kept here so the
+        # first word is not clipped while the speech_start_frames threshold
+        # accumulates.
+        self.pre_buffer_seconds = pre_buffer_seconds
 
     def record(self, cancel_event=None):
 
@@ -42,6 +49,12 @@ class VoiceRecorder:
             q.put(indata.copy())
 
         recording = []
+
+        # Rolling window of audio preceding the speech-start trigger; flushed
+        # into the recording the moment speech begins.
+        max_pre_samples = int(self.pre_buffer_seconds * self.sample_rate)
+        pre_buffer = deque()
+        pre_buffer_samples = 0
 
         silence = 0
         started = False
@@ -81,6 +94,14 @@ class VoiceRecorder:
 
                 if not started and speech_frames >= self.speech_start_frames:
                     started = True
+                    recording.extend(pre_buffer)
+                    pre_buffer.clear()
+
+                if not started:
+                    pre_buffer.append(audio)
+                    pre_buffer_samples += len(audio)
+                    while pre_buffer_samples > max_pre_samples and pre_buffer:
+                        pre_buffer_samples -= len(pre_buffer.popleft())
 
                 if started and volume > 0.015:
                     silence = 0
