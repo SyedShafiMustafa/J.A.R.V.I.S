@@ -9,6 +9,7 @@ export default function App() {
   const [reply, setReply] = useState('');
   const [toolEvents, setToolEvents] = useState([]);
   const [errorMessage, setErrorMessage] = useState('');
+  const [provider, setProvider] = useState(null);
   const [healthOk, setHealthOk] = useState(false);
   const [connected, setConnected] = useState(false);
   const [input, setInput] = useState('');
@@ -44,12 +45,21 @@ export default function App() {
       if (nextState.transcript) setTranscript(nextState.transcript);
       if (nextState.reply) setReply(nextState.reply);
       if (nextState.error_message) setErrorMessage(nextState.error_message);
+      if (nextState.provider) setProvider(nextState.provider);
+      return;
+    }
+
+    if (type === 'provider') {
+      const next = data.provider || null;
+      setProvider(next);
+      if (next) pushActivity('BRAIN ACTIVE', providerLabel(next));
       return;
     }
 
     if (type === 'status') {
       setStatus(data.status);
-      pushActivity(data.status.toUpperCase());
+      // "idle" is internal machinery — surface STANDBY, never a bare IDLE.
+      pushActivity(data.status === 'idle' ? 'STANDBY' : data.status.toUpperCase());
       if (data.status === 'error') {
         setErrorMessage('Connection or runtime error.');
       }
@@ -234,7 +244,7 @@ export default function App() {
   const lastToolEvent = toolEvents[0];
   const activeStatus = {
     OFFLINE: { label: 'OFFLINE', detail: 'Backend connection unavailable' },
-    IDLE: { label: 'IDLE', detail: 'Awaiting activity' },
+    IDLE: { label: 'STANDBY', detail: 'Voice control disabled' },
     WAKE_LISTENING: { label: 'LISTENING FOR "HEY JARVIS"', detail: 'Waiting for wake word...' },
     WAKE_DETECTED: { label: 'WAKE DETECTED', detail: 'Preparing command capture...' },
     CAPTURING: { label: 'LISTENING', detail: 'Speak now' },
@@ -314,9 +324,16 @@ export default function App() {
 
           <aside className="side-panel intelligence-panel">
             <div className="panel-label">INTELLIGENCE <span>03</span></div>
-            <div className="intel-row"><span>BRAIN / LLM</span><strong>{healthOk ? 'READY' : 'N/A'}</strong></div>
             <div className="intel-row"><span>MEMORY CORE</span><strong>{connected ? 'READY' : 'N/A'}</strong></div>
             <div className="intel-row"><span>TOOL SYSTEM</span><strong>{lastToolEvent ? 'ACTIVE' : 'IDLE'}</strong></div>
+            <div className="brain-indicator" data-fallback={provider?.fallback_used === true}>
+              <span className="brain-label">ACTIVE BRAIN</span>
+              <strong>{provider ? providerLabel(provider) : 'CONFIGURING...'}</strong>
+              <small>
+                PRIMARY: {(provider?.primary || 'OLLAMA').toUpperCase()}
+                {provider?.fallback ? ` // FALLBACK: ${provider.fallback.toUpperCase()}` : ''}
+              </small>
+            </div>
             <div className="intel-task">{lastToolEvent ? `${lastToolEvent.kind.toUpperCase()} // ${lastToolEvent.tool}` : 'NO ACTIVE TASK'}</div>
             <div className="panel-label activity-title">ACTIVITY STREAM <span>04</span></div>
             <div className="activity-stream">
@@ -350,6 +367,14 @@ export default function App() {
       </div>
     </>
   );
+}
+
+function providerLabel(provider) {
+  if (!provider) return 'N/A';
+  const vendor = (provider.vendor || provider.active || provider.primary || '').toUpperCase();
+  const model = (provider.model || '').split('/').pop().replace(/-/g, ' ').toUpperCase();
+  const base = model ? `${vendor} \u00b7 ${model}` : vendor;
+  return provider.fallback_used ? `${base} (FALLBACK)` : base;
 }
 
 function formatTime(ts) {
@@ -422,6 +447,12 @@ const styles = `
   .core-error .status-mark { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
   .core-error .core-status strong { color: var(--danger); }
   .activity-title { margin-top: 31px; }
+  .brain-indicator { margin-top: 16px; border: 1px solid var(--line); padding: 11px 13px; }
+  .brain-indicator .brain-label { display: block; color: var(--muted); font-size: 9px; letter-spacing: 1.6px; }
+  .brain-indicator strong { display: block; color: var(--cyan); font-size: 11px; margin-top: 6px; letter-spacing: .5px; }
+  .brain-indicator small { display: block; color: var(--muted); font-size: 8px; margin-top: 5px; letter-spacing: 1px; }
+  .brain-indicator[data-fallback='true'] { border-color: #7a6a2f; }
+  .brain-indicator[data-fallback='true'] strong { color: #e8c76a; }
   .intel-task { margin-top: 18px; min-height: 50px; border: 1px solid var(--line); padding: 13px; color: var(--cyan); font-size: 10px; line-height: 1.6; }
   .activity-stream { margin-top: 12px; max-height: 245px; overflow: auto; }
   .activity-item { display: grid; grid-template-columns: 58px 1fr; gap: 5px 9px; border-bottom: 1px solid rgba(23,56,64,.6); padding: 9px 0; font-size: 9px; }

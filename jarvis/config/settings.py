@@ -30,6 +30,10 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")            # e.g. https://api.opena
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "")                 # cloud model name
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
+# When the cloud provider is the primary brain, automatically fall back to the
+# local Ollama model if it is unreachable / rate-limited (never for a rejected
+# credential). Set LLM_FALLBACK=0 to disable.
+LLM_FALLBACK = os.getenv("LLM_FALLBACK", "1").strip().lower() not in {"0", "false", "no", "off"}
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
@@ -42,6 +46,12 @@ OLLAMA_RETRY_DELAY = float(os.getenv("OLLAMA_RETRY_DELAY", "0.25"))
 
 # --- Speech-to-text ---
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")   # tiny / base / medium / large-v3-turbo
+
+# --- Conversation mode ---
+# How long J.A.R.V.I.S. keeps listening for follow-up sentences after a wake
+# word before dropping back to wake-word-only listening. 0 = stay until the
+# user says the exit phrase ("bye-bye Jarvis").
+CONVERSATION_IDLE_TIMEOUT = float(os.getenv("CONVERSATION_IDLE_TIMEOUT", "60"))
 
 # --- Wake word ---
 PICOVOICE_ACCESS_KEY = os.getenv("PICOVOICE_ACCESS_KEY", "")

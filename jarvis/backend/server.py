@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import socket
 import sys
 import threading
@@ -52,6 +53,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from agents.ollama_errors import OllamaError
+from agents.llm_provider import configured_provider_status, provider_status
+from config.config import CONVERSATION_IDLE_TIMEOUT
 from backend.interfaces import ToolCall
 from backend.live_runtime import RuntimeUnavailableError, build_live_runtime
 from backend.bus import (
@@ -69,6 +72,10 @@ from audio.vad import (
 
 _log = logging.getLogger("jarvis.backend")
 logger = logging.getLogger("jarvis.backend")
+# Permanent, low-volume voice-latency observability: one line per stage with
+# monotonic deltas. Kept intentionally (not a temporary probe) so real-world
+# latency can always be measured from the logs.
+_timeline_log = logging.getLogger("jarvis.timeline")
 
 # ---------------------------------------------------------------------------
 # Runtime state model
@@ -148,6 +155,7 @@ class JarvisState:
         self.session_id: str | None = None
         self.wake_response: str | None = None
         self.started_at: str | None = None
+        self.provider: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -162,6 +170,7 @@ class JarvisState:
                 "session_id": self.session_id,
                 "wake_response": self.wake_response,
                 "started_at": self.started_at,
+                "provider": dict(self.provider) if self.provider else None,
             }
 
     # ---- thread-safe mutators ----
@@ -206,6 +215,10 @@ class JarvisState:
     def note_wake_response(self, text: str) -> None:
         with self.lock:
             self.wake_response = text
+
+    def set_provider(self, info: dict[str, Any]) -> None:
+        with self.lock:
+            self.provider = dict(info)
 
     def mark_started(self) -> None:
         with self.lock:
@@ -260,6 +273,7 @@ class JarvisBackendService:
             return
         self._started = True
         self.state.mark_started()
+        self._refresh_provider()
         self._http_server = ThreadingHTTPServer((self.host, self.port), _make_handler(self))
         self._http_server.daemon_threads = True
         self._http_server_thread = threading.Thread(
@@ -323,6 +337,23 @@ class JarvisBackendService:
     def _set_error(self, message: str) -> None:
         self.state.set_error(message)
         self.emit({"type": "state", "state": self.state.snapshot()})
+
+    def _refresh_provider(self) -> None:
+        """Publish which brain actually served the last request.
+
+        The live registry wins once a provider has run; before the first
+        request we report the configured brain so the HUD is never blank.
+        Never contains secrets.
+        """
+        try:
+            info = provider_status()
+            if not info.get("active"):
+                info = configured_provider_status()
+        except Exception:
+            _log.debug("provider status unavailable", exc_info=True)
+            return
+        self.state.set_provider(info)
+        self.emit({"type": "provider", "provider": info})
 
     def start_listening(self) -> tuple[int, dict[str, Any]]:
         if self._voice_mode:
@@ -485,8 +516,14 @@ class JarvisBackendService:
 
         session.note_user(text)
 
+        plan_at = time.monotonic()
         try:
             task = orchestrator.plan_action(text)
+            self._refresh_provider()
+            _timeline_log.info(
+                "planner_done_ms=%.0f steps=%d",
+                (time.monotonic() - plan_at) * 1000, len(task.steps),
+            )
         except Exception as exc:
             _log.exception("planning failed")
             message = getattr(
@@ -569,11 +606,23 @@ class JarvisBackendService:
         ]
 
         full_reply = ""
+        brain_at = time.monotonic()
+        first_token_logged = False
         try:
             for sentence in brain.stream(messages):
+                if not first_token_logged:
+                    first_token_logged = True
+                    _timeline_log.info(
+                        "brain_first_token_ms=%.0f context_chars=%d provider=%s",
+                        (time.monotonic() - brain_at) * 1000,
+                        sum(len(m.get("content", "")) for m in messages),
+                        (provider_status().get("vendor") or provider_status().get("active") or "?"),
+                    )
                 full_reply += sentence + " "
                 self._speak(audio, sentence)
+            self._refresh_provider()
         except OllamaError as exc:
+            self._refresh_provider()
             _log.exception("brain request failed")
             message = exc.user_message
             self._set_error(message)
@@ -600,6 +649,7 @@ class JarvisBackendService:
         self.emit({"type": "status", "status": STATUS_SPEAKING})
         self.emit({"type": "reply", "text": text})
         self.state.set_reply(text)
+        speak_at = time.monotonic()
         try:
             audio.speak(text)
             audio.wait()
@@ -608,6 +658,10 @@ class JarvisBackendService:
             self._set_error(f"speak failed: {exc}")
             self.emit({"type": "error", "message": f"speak failed: {exc}"})
         finally:
+            _timeline_log.info(
+                "tts_playback_ms=%.0f chars=%d",
+                (time.monotonic() - speak_at) * 1000, len(text),
+            )
             if self.state.status not in {STATUS_ERROR}:
                 self.state.set_status(STATUS_IDLE)
                 self._set_phase(PHASE_IDLE)
@@ -668,6 +722,8 @@ class JarvisBackendService:
 
         def on_wake(event):
             if getattr(event, "kind", "") == "wake.detected":
+                if not wake_event.is_set():
+                    _timeline_log.info("wake_detected")
                 self._set_phase(PHASE_WAKE_DETECTED)
                 wake_event.set()
 
@@ -753,16 +809,26 @@ class JarvisBackendService:
             if lifecycle.shutdown_requested:
                 return
 
-            timeout = time.time() + 30
+            # CONVERSATION MODE: stay locally armed and keep accepting
+            # follow-up sentences without requiring the wake word again.
+            # The idle backstop only drops back to wake-only listening.
+            idle_window = max(CONVERSATION_IDLE_TIMEOUT, 5.0)
+            timeout = time.monotonic() + idle_window
+            _timeline_log.info("conversation_start idle_window_s=%.0f", idle_window)
 
-            while time.time() < timeout:
+            while time.monotonic() < timeout:
                 if self._voice_future is not None and self._voice_future.is_set():
                     return
 
+                capture_at = time.monotonic()
                 try:
                     self._set_phase(PHASE_CAPTURING)
                     audio_path = audio.record_audio(cancel_event=self._voice_future)
                 except (NoSpeechError, RecordingTimeoutError) as exc:
+                    _timeline_log.info(
+                        "vad_capture_ms=%.0f outcome=%s",
+                        (time.monotonic() - capture_at) * 1000, type(exc).__name__,
+                    )
                     _log.info("recording ended without speech: %s", exc)
                     if self._voice_mode and self._voice_future is not None and not self._voice_future.is_set():
                         self._set_phase(PHASE_WAKE_LISTENING)
@@ -776,8 +842,17 @@ class JarvisBackendService:
                     self.emit({"type": "error", "message": f"record failed: {exc}"})
                     return
 
+                _timeline_log.info(
+                    "vad_capture_ms=%.0f outcome=speech",
+                    (time.monotonic() - capture_at) * 1000,
+                )
                 self._set_phase(PHASE_TRANSCRIBING)
+                stt_at = time.monotonic()
                 user = (audio.transcribe(audio_path) or "").strip()
+                _timeline_log.info(
+                    "stt_done dur_ms=%.0f chars=%d",
+                    (time.monotonic() - stt_at) * 1000, len(user),
+                )
 
                 if not user:
                     continue
@@ -789,6 +864,20 @@ class JarvisBackendService:
                 self.state.set_transcript(user)
                 self.emit({"type": "user_text", "text": user})
                 bus.publish(transcription_ready(session_id=session.id, user_text=user))
+                self._refresh_provider()
+
+                # "Bye-bye Jarvis" ends CONVERSATION MODE and returns to
+                # wake-word listening — it does NOT shut the app down. The
+                # wake listener stays healthy and the next "Hey Jarvis"
+                # re-enters conversation mode.
+                if _is_conversation_exit_phrase(user):
+                    reply = "Standing by. Say Hey Jarvis when you need me."
+                    self._speak(audio, reply)
+                    if conversation_id:
+                        memory.save_message(conversation_id, "assistant", reply)
+                    self._set_phase(PHASE_WAKE_LISTENING)
+                    _timeline_log.info("conversation_exit phrase=%r", user)
+                    return
 
                 if _is_shutdown_phrase(user):
                     reply = "Shutting down. Goodbye, Shafi."
@@ -797,14 +886,6 @@ class JarvisBackendService:
                         memory.save_message(conversation_id, "assistant", reply)
                     lifecycle.request_shutdown()
                     lifecycle.shutdown()
-                    return
-
-                if _is_sleep_phrase(user):
-                    reply = "Going back to sleep."
-                    self._speak(audio, reply)
-                    if conversation_id:
-                        memory.save_message(conversation_id, "assistant", reply)
-                    lifecycle.request_shutdown()
                     return
 
                 if lifecycle.shutdown_requested:
@@ -825,7 +906,8 @@ class JarvisBackendService:
                 else:
                     self._run_chat(runtime, user)
 
-                timeout = time.time() + 30
+                # A completed turn refreshes the conversation window.
+                timeout = time.monotonic() + idle_window
         finally:
             bus.unsubscribe(on_interrupt)
 
@@ -859,28 +941,50 @@ class JarvisBackendService:
             _log.exception("bus bridge subscribe failed")
 
 
+# Phrases that end CONVERSATION MODE and return to wake-word listening.
+# NB: these deliberately do NOT shut J.A.R.V.I.S. down — "bye-bye Jarvis" must
+# leave the wake listener armed for the next "Hey Jarvis".
+_CONVERSATION_EXIT_PHRASES = [
+    "bye bye jarvis",
+    "byebye jarvis",
+    "bye jarvis",
+    "goodbye jarvis",
+    "good bye jarvis",
+    "see you later",
+    "thats all",
+    "that s all",
+    "stop listening",
+    "go to sleep",
+    "sleep mode",
+    "go idle",
+]
+
+# Phrases that intentionally shut J.A.R.V.I.S. down (explicit, unambiguous).
+_SHUTDOWN_PHRASES = [
+    "shutdown jarvis",
+    "shut down jarvis",
+    "jarvis shutdown",
+    "power off",
+    "exit jarvis",
+    "quit jarvis",
+    "im done",
+    "i am done",
+]
+
+
+def _normalize_phrase(text: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z\s]", " ", text.lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _is_conversation_exit_phrase(text: str) -> bool:
+    cleaned = _normalize_phrase(text)
+    return any(p in cleaned for p in _CONVERSATION_EXIT_PHRASES)
+
+
 def _is_shutdown_phrase(text: str) -> bool:
-    import re
-    cleaned = re.sub(r"[^a-zA-Z\s]", "", text.lower()).strip()
-    phrases = [
-        "jarvis shutdown",
-        "shutdown jarvis",
-        "shut down",
-        "goodbye",
-        "bye",
-        "see you later",
-        "exit",
-        "quit",
-        "im done",
-        "i am done",
-        "thats all",
-    ]
-    return any(p in cleaned for p in phrases)
-
-
-def _is_sleep_phrase(text: str) -> bool:
-    cleaned = text.lower()
-    return any(p in cleaned for p in ["go to sleep", "sleep mode", "go idle"])
+    cleaned = _normalize_phrase(text)
+    return any(p in cleaned for p in _SHUTDOWN_PHRASES)
 
 
 # ---------------------------------------------------------------------------

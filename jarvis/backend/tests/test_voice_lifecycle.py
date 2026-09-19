@@ -294,6 +294,18 @@ class FakeSession:
     id = "test-session"
     conversation_id = None
 
+    def note_user(self, text):
+        pass
+
+    def note_decision(self, metadata):
+        pass
+
+    def note_reply(self, text):
+        pass
+
+    def cancel_active_task(self):
+        pass
+
 
 class FakeMemory:
     def save_message(self, *args):
@@ -550,3 +562,110 @@ def test_barge_in_non_wake_audio_does_not_interrupt(monkeypatch, fake_barge_scor
     time.sleep(0.05)
     assert not any(e.kind == "user.interrupt" for e in events)
     provider.stop_speaking()
+
+
+# ---------------------------------------------------------------------------
+# CONVERSATION MODE
+# ---------------------------------------------------------------------------
+
+class ConversationAudio:
+    """Audio double that yields scripted transcripts, then goes quiet.
+
+    It deliberately has no ``start_wake_word``: if the conversation path tried
+    to open a *second* microphone stream mid-conversation, the missing
+    attribute would raise and fail the test.
+    """
+
+    def __init__(self, transcripts):
+        self.transcripts = list(transcripts)
+        self.speaks = []
+        self.records = 0
+
+    def speak(self, text):
+        self.speaks.append(text)
+
+    def wait(self):
+        pass
+
+    def record_audio(self, cancel_event=None):
+        if not self.transcripts:
+            # Real lifecycle: no speech in the window is reported by the VAD.
+            raise NoSpeechError("no more speech")
+        self.records += 1
+        return f"capture-{self.records}"
+
+    def transcribe(self, path):
+        return self.transcripts.pop(0)
+
+
+class RecordingOrchestrator:
+    def __init__(self):
+        self.users = []
+
+    def decide(self, text):
+        self.users.append(text)
+        return types.SimpleNamespace(kind="reply", reply=f"acknowledged {text}", metadata={})
+
+
+def conversation_service(transcripts):
+    audio = ConversationAudio(transcripts)
+    orchestrator = RecordingOrchestrator()
+    service = JarvisBackendService()
+    service._voice_mode = True
+    service._voice_future = threading.Event()
+    runtime = {
+        "audio": audio,
+        "session": FakeSession(),
+        "lifecycle": FakeLifecycle(),
+        "orchestrator": orchestrator,
+        "bus": BackendBus(),
+        "memory": FakeMemory(),
+    }
+    return service, audio, orchestrator, runtime
+
+
+def test_bye_bye_jarvis_exits_conversation_without_shutdown():
+    service, audio, orchestrator, runtime = conversation_service(["bye bye jarvis"])
+
+    service._voice_conversation(runtime)
+
+    assert service.state.snapshot()["phase"] == PHASE_WAKE_LISTENING
+    # Wake listener stays healthy: "bye-bye Jarvis" must not stop J.A.R.V.I.S.
+    assert runtime["lifecycle"].shutdown_requested is False
+    # The exit phrase is handled locally, never sent to the brain.
+    assert orchestrator.users == []
+
+
+def test_conversation_mode_takes_multiple_turns_without_wake_word():
+    service, audio, orchestrator, runtime = conversation_service(
+        ["hello", "what time is it"]
+    )
+
+    service._voice_conversation(runtime)
+
+    # Two follow-up sentences handled with no second "Hey Jarvis", and no
+    # competing microphone stream opened in between.
+    assert orchestrator.users == ["hello", "what time is it"]
+    assert audio.records >= 2
+
+
+def test_conversation_returns_to_wake_listening_when_user_goes_quiet():
+    service, audio, orchestrator, runtime = conversation_service(["hello"])
+
+    service._voice_conversation(runtime)
+
+    assert orchestrator.users == ["hello"]
+    assert service.state.snapshot()["phase"] == PHASE_WAKE_LISTENING
+
+
+def test_state_exposes_active_provider_without_secrets():
+    service = JarvisBackendService()
+    service._refresh_provider()
+
+    provider = service.state.snapshot()["provider"]
+
+    assert provider is not None
+    assert provider["active"] in {"openai", "ollama"}
+    assert provider["vendor"]
+    # Never leak credential material through the state snapshot.
+    assert not any("key" in field.lower() or "token" in field.lower() for field in provider)

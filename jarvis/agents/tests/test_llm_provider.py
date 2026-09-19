@@ -1,10 +1,16 @@
 import json
 
+import pytest
+import requests
+
 from agents import llm_provider
 from agents.llm_provider import (
+    FallbackProvider,
     OllamaProvider,
     OpenAICompatProvider,
     build_llm_provider,
+    configured_provider_status,
+    provider_status,
 )
 
 
@@ -40,15 +46,114 @@ def test_factory_falls_back_to_ollama_when_cloud_incomplete(monkeypatch):
     assert isinstance(build_llm_provider(), OllamaProvider)
 
 
-def test_factory_selects_openai_when_fully_configured(monkeypatch):
+def _configure_cloud(monkeypatch, *, fallback=True):
     monkeypatch.setattr(llm_provider, "LLM_PROVIDER", "openai")
-    monkeypatch.setattr(llm_provider, "LLM_BASE_URL", "https://api.example.com/v1")
+    monkeypatch.setattr(llm_provider, "LLM_BASE_URL", "https://api.groq.com/openai/v1")
     monkeypatch.setattr(llm_provider, "LLM_API_KEY", "secret")
-    monkeypatch.setattr(llm_provider, "LLM_MODEL", "gpt-fast")
+    monkeypatch.setattr(llm_provider, "LLM_MODEL", "openai/gpt-oss-20b")
+    monkeypatch.setattr(llm_provider, "LLM_FALLBACK", fallback)
+
+
+def test_factory_selects_openai_with_ollama_fallback(monkeypatch):
+    _configure_cloud(monkeypatch)
+    provider = build_llm_provider()
+    assert isinstance(provider, FallbackProvider)
+    assert isinstance(provider.primary, OpenAICompatProvider)
+    assert isinstance(provider.fallback, OllamaProvider)
+    assert provider.model == "openai/gpt-oss-20b"
+    assert provider.base_url == "https://api.groq.com/openai/v1"
+
+
+def test_factory_can_disable_fallback(monkeypatch):
+    _configure_cloud(monkeypatch, fallback=False)
     provider = build_llm_provider()
     assert isinstance(provider, OpenAICompatProvider)
-    assert provider.model == "gpt-fast"
-    assert provider.base_url == "https://api.example.com/v1"
+    assert provider.model == "openai/gpt-oss-20b"
+
+
+def test_groq_is_primary_and_ollama_is_the_configured_fallback(monkeypatch):
+    _configure_cloud(monkeypatch)
+    monkeypatch.setattr(llm_provider, "OLLAMA_MODEL", "llama3.1:latest")
+    status = configured_provider_status()
+    assert status["active"] == "openai"
+    assert status["primary"] == "openai"
+    assert status["fallback"] == "ollama"
+    assert status["vendor"] == "groq"
+    assert status["fallback_model"] == "llama3.1:latest"
+    # Never leaks the key.
+    assert "secret" not in json.dumps(status)
+
+
+def test_status_tracks_active_provider_after_a_call(monkeypatch):
+    _configure_cloud(monkeypatch)
+    provider = build_llm_provider()
+    response = FakeResponse(lines=[
+        b'data: {"choices":[{"delta":{"content":"Hi."}}]}',
+        b"data: [DONE]",
+    ])
+    monkeypatch.setattr("agents.llm_provider.requests.post", lambda *a, **k: response)
+    assert list(provider.stream([{"role": "user", "content": "hi"}])) == ["Hi."]
+    info = provider_status()
+    assert info["active"] == "openai"
+    assert info["vendor"] == "groq"
+    assert info["fallback_used"] is False
+
+
+class _DownPrimary:
+    name = "openai"
+    model = "openai/gpt-oss-20b"
+    base_url = "https://api.groq.com/openai/v1"
+
+    def stream(self, messages, **options):
+        raise requests.ConnectionError("groq unreachable")
+        yield  # pragma: no cover
+
+    def complete(self, messages, **options):
+        raise requests.ConnectionError("groq unreachable")
+
+
+class _WorkingFallback:
+    name = "ollama"
+    model = "llama3.1:latest"
+
+    def stream(self, messages, **options):
+        yield "Local answer."
+
+    def complete(self, messages, **options):
+        return "Local answer."
+
+
+class _RejectingPrimary(_DownPrimary):
+    def stream(self, messages, **options):
+        response = requests.Response()
+        response.status_code = 401
+        raise requests.HTTPError("unauthorized", response=response)
+        yield  # pragma: no cover
+
+
+def test_transient_primary_failure_falls_back_to_ollama():
+    provider = FallbackProvider(_DownPrimary(), _WorkingFallback())
+    assert list(provider.stream([{"role": "user", "content": "hi"}])) == ["Local answer."]
+    info = provider_status()
+    assert info["active"] == "ollama"
+    assert info["fallback_used"] is True
+
+
+def test_rejected_credential_does_not_silently_fall_back():
+    provider = FallbackProvider(_RejectingPrimary(), _WorkingFallback())
+    with pytest.raises(requests.HTTPError):
+        list(provider.stream([{"role": "user", "content": "hi"}]))
+
+
+def test_no_duplicate_fallback_after_partial_stream():
+    class PartialPrimary(_DownPrimary):
+        def stream(self, messages, **options):
+            yield "First sentence."
+            raise requests.ConnectionError("dropped mid-stream")
+
+    provider = FallbackProvider(PartialPrimary(), _WorkingFallback())
+    with pytest.raises(requests.ConnectionError):
+        list(provider.stream([{"role": "user", "content": "hi"}]))
 
 
 def test_openai_provider_streams_sentences_from_sse(monkeypatch):

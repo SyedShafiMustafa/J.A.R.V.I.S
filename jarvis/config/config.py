@@ -16,6 +16,8 @@ from config.settings import (
     LLM_API_KEY,           # never hardcoded; .env only
     LLM_MODEL,             # cloud model name
     LLM_TEMPERATURE,
+    LLM_FALLBACK,          # cloud primary -> local Ollama fallback
+    CONVERSATION_IDLE_TIMEOUT,
     OLLAMA_MODEL,          # from .env, defaults to qwen2.5:3b
     OLLAMA_URL,            # Ollama/Qwen provider endpoint (from .env)
     OLLAMA_TIMEOUT,

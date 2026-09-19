@@ -31,14 +31,39 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(messa
 logger = logging.getLogger("jarvis.api")
 
 
+def _configure_timeline_log() -> Path:
+    """Write the voice-latency timeline to its own file.
+
+    The ``jarvis.timeline`` logger emits one line per stage with monotonic
+    deltas (wake, VAD capture, STT, brain first token, TTS playback). Keeping
+    it in a dedicated file makes per-turn latency easy to read without the
+    rest of the backend log noise.
+    """
+    from config.config import LOGS_DIR
+
+    path = LOGS_DIR / "voice_timeline.log"
+    timeline = logging.getLogger("jarvis.timeline")
+    timeline.setLevel(logging.INFO)
+    if not any(isinstance(h, logging.FileHandler) for h in timeline.handlers):
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        timeline.addHandler(handler)
+    # Own file only — do not also duplicate into the root/backend log.
+    timeline.propagate = False
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Jarvis backend service")
     parser.add_argument("--port", type=int, default=8000, help="HTTP + WebSocket port")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="listen host")
     args = parser.parse_args()
 
+    timeline_path = _configure_timeline_log()
+
     print(f"[api] starting Jarvis backend on http://{args.host}:{args.port}")
     print(f"[api] websocket on ws://{args.host}:{args.port}/ws")
+    print(f"[api] voice timeline -> {timeline_path}")
 
     from backend.server import JarvisBackendService
 
