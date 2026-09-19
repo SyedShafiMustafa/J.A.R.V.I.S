@@ -55,6 +55,8 @@ def build_live_runtime(
         from agents.planner import TaskPlanner
         from core.memory import Memory
         from core.router import CommandRouter
+        from core.permission import PermissionEngine, ConfirmationStore
+        from core.scheduler import TaskScheduler
     except Exception as exc:
         raise RuntimeUnavailableError(
             f"live runtime dependencies unavailable: {exc}"
@@ -68,11 +70,12 @@ def build_live_runtime(
 
         # Initialize memory and restore/create conversation
         memory = Memory()
-        last_conversation = memory.get_last_conversation()
-        if last_conversation:
-            session_id = last_conversation["id"]
-        else:
-            session_id = memory.create_conversation()
+        if session_id == "voice-session":
+            last_conversation = memory.get_last_conversation()
+            if last_conversation:
+                session_id = last_conversation["id"]
+            else:
+                session_id = memory.create_conversation()
 
         session = Session(session_id)
         session.conversation_id = session_id
@@ -81,13 +84,50 @@ def build_live_runtime(
         lifecycle = Lifecycle(runtime_bus, session)
         lifecycle.mark_started()
 
+        permission_engine = PermissionEngine()
+        confirmation_store = ConfirmationStore()
+
         audio = LiveAudioProvider(bus=runtime_bus, session_id=session.id)
-        tool_runner = LiveToolRunner(bus=runtime_bus, session_id=session.id)
+        tool_runner = LiveToolRunner(
+            bus=runtime_bus,
+            session_id=session.id,
+            permission_engine=permission_engine,
+            confirmation_store=confirmation_store,
+        )
         orchestrator = LiveOrchestrator()
 
         brain = JarvisBrain()
         planner = TaskPlanner()
         router = CommandRouter()
+
+        scheduler = TaskScheduler()
+
+        def _run_scheduled(name: str, payload: dict) -> Any:
+            from backend.interfaces import ToolCall
+
+            payload = payload or {}
+
+            # A reminder speaks the stored text instead of running a tool.
+            remind = payload.get("remind")
+            if remind:
+                try:
+                    audio.speak(str(remind))
+                    audio.wait()
+                except Exception:
+                    import logging
+                    logging.getLogger("jarvis.scheduler").warning(
+                        "reminder speech failed", exc_info=True
+                    )
+                return None
+
+            tool = payload.get("tool") or name
+            args = payload.get("payload") if isinstance(payload.get("payload"), dict) else {
+                k: v for k, v in payload.items() if k != "tool"
+            }
+            return tool_runner.run(ToolCall(tool=tool, payload=args))
+
+        scheduler.set_action_handler(_run_scheduled)
+        scheduler.start()
 
         # Warm up models to avoid cold-loading delays during first conversation
         _warm_up_models(audio, brain)
@@ -103,6 +143,9 @@ def build_live_runtime(
             "planner": planner,
             "memory": memory,
             "router": router,
+            "permission_engine": permission_engine,
+            "confirmation_store": confirmation_store,
+            "scheduler": scheduler,
         }
     except RuntimeUnavailableError:
         raise

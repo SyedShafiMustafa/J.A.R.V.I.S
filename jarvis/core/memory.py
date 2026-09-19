@@ -1,3 +1,4 @@
+import re
 import threading
 import sqlite3
 import uuid
@@ -67,6 +68,63 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
     """)
 
+    # Structured Memory Categories
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_profile (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS factual_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact TEXT NOT NULL,
+            category TEXT DEFAULT 'general',
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS episodic_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event TEXT NOT NULL,
+            details TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS task_memory (
+            id TEXT PRIMARY KEY,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL,
+            steps_json TEXT DEFAULT '[]',
+            result_message TEXT DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS project_memory (
+            key TEXT PRIMARY KEY,
+            info TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS experience_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scenario TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            lesson TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+
     # Indexes
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)"
@@ -77,13 +135,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_summaries_conversation ON conversation_summaries(conversation_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_experience_scenario ON experience_memory(scenario)"
+    )
 
     conn.commit()
 
 
 class Memory:
-    def __init__(self):
-        self.db_path = MEMORY_DB_PATH
+    def __init__(self, db_path=None):
+        self.db_path = db_path or MEMORY_DB_PATH
 
         self.conn = sqlite3.connect(
             str(self.db_path),
@@ -500,3 +561,91 @@ Summary:"""
                 results.extend(self.cursor.fetchall())
 
         return list(dict.fromkeys(results))
+
+    # --- Structured Memory Categories ---
+
+    def set_user_profile(self, key: str, value: str) -> None:
+        now = _iso_now()
+        with self.lock:
+            self.cursor.execute(
+                "INSERT INTO user_profile (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, value, now)
+            )
+            self.conn.commit()
+
+    def get_user_profile(self, key: str) -> str | None:
+        with self.lock:
+            row = self.cursor.execute("SELECT value FROM user_profile WHERE key = ?", (key,)).fetchone()
+            return row[0] if row else None
+
+    def save_fact(self, fact: str, category: str = "general") -> int:
+        now = _iso_now()
+        with self.lock:
+            cur = self.cursor.execute(
+                "INSERT INTO factual_memory (fact, category, created_at) VALUES (?, ?, ?)",
+                (fact, category, now)
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def save_experience(self, scenario: str, strategy: str, outcome: str, lesson: str) -> int:
+        now = _iso_now()
+        with self.lock:
+            cur = self.cursor.execute(
+                "INSERT INTO experience_memory (scenario, strategy, outcome, lesson, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (scenario, strategy, outcome, lesson, now)
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def search_experiences(self, scenario_query: str) -> list[dict]:
+        with self.lock:
+            rows = self.cursor.execute(
+                "SELECT id, scenario, strategy, outcome, lesson, created_at FROM experience_memory "
+                "WHERE LOWER(scenario) LIKE ? ORDER BY created_at DESC LIMIT 5",
+                (f"%{scenario_query.lower()}%",)
+            ).fetchall()
+            return [
+                {"id": r[0], "scenario": r[1], "strategy": r[2], "outcome": r[3], "lesson": r[4], "created_at": r[5]}
+                for r in rows
+            ]
+
+    def retrieve_experiences(self, query: str, limit: int = 3) -> list[dict]:
+        """Return up to ``limit`` experiences relevant to ``query``.
+
+        Scoring is deliberately simple and BOUNDED: a small candidate window
+        is scanned and only token-overlapping rows are returned, so the whole
+        experience table is never dumped into a prompt. Irrelevant rows are
+        excluded entirely.
+        """
+        tokens = {
+            t for t in re.split(r"[^a-z0-9_]+", (query or "").lower())
+            if len(t) >= 3
+        }
+        if not tokens:
+            return []
+
+        with self.lock:
+            rows = self.cursor.execute(
+                "SELECT id, scenario, strategy, outcome, lesson, created_at FROM experience_memory "
+                "ORDER BY created_at DESC LIMIT 200"
+            ).fetchall()
+
+        scored: list[tuple[int, dict]] = []
+        for r in rows:
+            entry = {
+                "id": r[0], "scenario": r[1], "strategy": r[2],
+                "outcome": r[3], "lesson": r[4], "created_at": r[5],
+            }
+            haystack = " ".join(
+                str(entry[k] or "").lower()
+                for k in ("scenario", "strategy", "lesson")
+            )
+            score = sum(1 for t in tokens if t in haystack)
+            if score > 0:
+                scored.append((score, entry))
+
+        scored.sort(key=lambda item: (-item[0], item[1]["created_at"]), reverse=False)
+        return [entry for _score, entry in scored[:limit]]

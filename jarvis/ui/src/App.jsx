@@ -15,6 +15,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [activityEvents, setActivityEvents] = useState([]);
+  const [pendingAction, setPendingAction] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -130,6 +131,24 @@ export default function App() {
       return;
     }
 
+    if (type === 'confirmation_required') {
+      setPendingAction({ action_id: data.action_id, tool: data.tool });
+      pushActivity('CONFIRMATION REQUIRED', data.tool || 'action');
+      return;
+    }
+
+    if (type === 'confirmation_resolved') {
+      setPendingAction(null);
+      pushActivity('CONFIRMATION RESOLVED', data.approved ? 'APPROVED' : 'REJECTED');
+      return;
+    }
+
+    if (type === 'emergency_stop') {
+      setPendingAction(null);
+      pushActivity('EMERGENCY STOP');
+      return;
+    }
+
     if (type === 'error') {
       setErrorMessage(data.message || 'Unknown error');
       setStatus('error');
@@ -238,6 +257,28 @@ export default function App() {
       } catch (err) {
         setErrorMessage(err.message || 'Start failed');
       }
+    }
+  };
+
+  const handleEmergencyStop = async () => {
+    setVoiceStopped(true);
+    setPendingAction(null);
+    try {
+      await api.emergencyStop();
+      pushActivity('EMERGENCY STOP');
+    } catch (err) {
+      setErrorMessage(err.message || 'Emergency stop failed');
+    }
+  };
+
+  const handleConfirm = async (approve) => {
+    if (!pendingAction) return;
+    try {
+      await api.confirmAction(pendingAction.action_id, approve);
+      setPendingAction(null);
+      pushActivity('CONFIRMATION', approve ? 'APPROVED' : 'REJECTED');
+    } catch (err) {
+      setErrorMessage(err.message || 'Confirmation failed');
     }
   };
 
@@ -360,7 +401,18 @@ export default function App() {
               <input ref={inputRef} className="command-input" placeholder="Enter a text command..." value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown} disabled={sending} />
               <button className="send-button" onClick={handleSend} disabled={!input.trim() || sending}>{sending ? '...' : 'TRANSMIT'}</button>
             </div>
+            <button className="stop-button" onClick={handleEmergencyStop} aria-label="Emergency stop">
+              <span className="talk-symbol">✕</span>
+              <span>EMERGENCY STOP</span>
+            </button>
             <div className="dock-hint">CENTRAL J // PRIMARY VOICE CONTROL — CLICK THE J TO TOGGLE LISTENING</div>
+            {pendingAction && (
+              <div className="confirm-banner">
+                <span>CONFIRM ACTION // {String(pendingAction.tool || '').toUpperCase()}</span>
+                <button className="confirm-approve" onClick={() => handleConfirm(true)}>CONFIRM</button>
+                <button className="confirm-reject" onClick={() => handleConfirm(false)}>CANCEL</button>
+              </div>
+            )}
             {errorMessage && <div className="error-banner"><span>{errorMessage}</span><button className="error-dismiss" onClick={() => setErrorMessage('')}>DISMISS</button></div>}
           </section>
         </main>
@@ -480,6 +532,12 @@ const styles = `
   .send-button:disabled { color: var(--muted); cursor: not-allowed; opacity: .55; }
   .error-banner { grid-column: 1 / -1; border: 1px solid var(--danger); color: var(--danger); padding: 10px 12px; font-size: 11px; display: flex; justify-content: space-between; }
   .error-dismiss { border: 0; background: transparent; color: inherit; cursor: pointer; }
+  .stop-button { border: 1px solid var(--danger); color: var(--danger); background: rgba(255,90,90,.06); cursor: pointer; min-width: 220px; padding: 0 22px; min-height: 44px; display: flex; align-items: center; justify-content: center; gap: 12px; letter-spacing: 1px; font-weight: 600; }
+  .stop-button:hover { background: rgba(255,90,90,.16); }
+  .confirm-banner { grid-column: 1 / -1; border: 1px solid var(--cyan); color: var(--cyan); padding: 10px 12px; font-size: 11px; display: flex; align-items: center; gap: 12px; }
+  .confirm-banner span { flex: 1; }
+  .confirm-approve, .confirm-reject { border: 1px solid var(--cyan); background: transparent; color: var(--cyan); cursor: pointer; padding: 5px 12px; letter-spacing: 1px; }
+  .confirm-reject { border-color: var(--danger); color: var(--danger); }
   /* central J = primary voice control */
   button.core-visual { background: none; border: 0; padding: 0; cursor: pointer; }
   button.core-visual:focus-visible { outline: 2px solid var(--cyan); outline-offset: 8px; border-radius: 50%; }

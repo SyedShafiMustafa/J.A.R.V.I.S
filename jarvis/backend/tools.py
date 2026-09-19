@@ -241,5 +241,125 @@ def build_default_tool_registry() -> ToolRegistry:
         supports_dry_run=False,
         input_fields=[{"name": "text", "type": "string", "required": True}],
     ))
+    registry.register(ToolDefinition(
+        name="send_whatsapp",
+        description="Send a message to a recipient on WhatsApp Desktop",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "recipient", "type": "string", "required": True},
+            {"name": "message", "type": "string", "required": True},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="list_files",
+        description="List files in a directory",
+        supports_dry_run=True,
+        input_fields=[{"name": "directory", "type": "string", "required": False}],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="inspect_file",
+        description="Read file contents",
+        supports_dry_run=True,
+        input_fields=[{"name": "path", "type": "string", "required": True}],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="create_file",
+        description="Create a new file with content",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "path", "type": "string", "required": True},
+            {"name": "content", "type": "string", "required": False},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="edit_file",
+        description="Update file content",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "path", "type": "string", "required": True},
+            {"name": "content", "type": "string", "required": True},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="move_file",
+        description="Move or rename a file or directory",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "src", "type": "string", "required": True},
+            {"name": "dst", "type": "string", "required": True},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="search_files",
+        description="Search for files matching a glob pattern",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "directory", "type": "string", "required": True},
+            {"name": "pattern", "type": "string", "required": True},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="delete_file",
+        description="Delete a file or directory",
+        supports_dry_run=True,
+        input_fields=[{"name": "path", "type": "string", "required": True}],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="execute_terminal",
+        description="Execute a shell command in the workspace",
+        supports_dry_run=True,
+        input_fields=[{"name": "command", "type": "string", "required": True}],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="git_status",
+        description="Inspect git repository status",
+        supports_dry_run=True,
+        input_fields=[],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="git_diff",
+        description="Inspect uncommitted git changes",
+        supports_dry_run=True,
+        input_fields=[],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="git_log",
+        description="Inspect recent git commit history",
+        supports_dry_run=True,
+        input_fields=[{"name": "n", "type": "number", "required": False}],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="git_branch",
+        description="Show current git branch",
+        supports_dry_run=True,
+        input_fields=[],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="run_python_script",
+        description="Execute a Python script in the project",
+        supports_dry_run=True,
+        input_fields=[{"name": "script_path", "type": "string", "required": True}],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="run_pytest",
+        description="Run pytest suite or specific test file",
+        supports_dry_run=True,
+        input_fields=[{"name": "test_path", "type": "string", "required": False}],
+        idempotent=False,
+    ))
 
     return registry

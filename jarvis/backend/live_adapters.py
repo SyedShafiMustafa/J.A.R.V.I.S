@@ -330,12 +330,20 @@ class LiveToolRunner:
     place for validation, retries, timeouts, and structured logging.
     """
 
-    def __init__(self, bus: BackendBus, session_id: str | None = None) -> None:
+    def __init__(
+        self,
+        bus: BackendBus,
+        session_id: str | None = None,
+        permission_engine: Any | None = None,
+        confirmation_store: Any | None = None,
+    ) -> None:
         from tools.executor import TaskExecutor
 
         self.bus = bus
         self._executor = TaskExecutor()
         self._session_id = session_id
+        self._permission_engine = permission_engine
+        self._confirmation_store = confirmation_store
         self._retry_config = RetryConfig(
             max_attempts=3,
             base_delay_s=0.5,
@@ -348,7 +356,12 @@ class LiveToolRunner:
     def tool_definition(self, tool: str) -> ToolDefinition | None:
         return self._registry.get(tool)
 
-    def run(self, call: ToolCall, task: Task | None = None) -> ToolResult:
+    def run(
+        self,
+        call: ToolCall,
+        task: Task | None = None,
+        confirmed: bool = False,
+    ) -> ToolResult:
         task_id = None if task is None else task.id
 
         definition = self._registry.get(call.tool)
@@ -363,6 +376,15 @@ class LiveToolRunner:
                 tool=call.tool,
                 reason=f"Unknown tool: {call.tool}",
             ).to_result()
+
+        # Centralized permission gate: sensitive/destructive actions are not
+        # executed inline. They are persisted as a pending action and resumed
+        # verbatim when the user approves. `confirmed=True` is the resume path
+        # used by the confirmation store, which must not re-block.
+        if not confirmed:
+            blocked = self._permission_gate(call, task_id=task_id)
+            if blocked is not None:
+                return blocked
 
         def _execute() -> ToolResult:
             self.bus.publish(tool_started(
@@ -425,6 +447,60 @@ class LiveToolRunner:
             return retry(_execute, config=self._retry_config)
 
         return _execute()
+
+    def _permission_gate(self, call: ToolCall, task_id: str | None = None) -> ToolResult | None:
+        """Return a blocking ToolResult when the action needs confirmation."""
+        engine = self._permission_engine
+        if engine is None:
+            return None
+        try:
+            level, requires = engine.evaluate(
+                call.tool, dict(call.payload), is_explicit_user_request=True
+            )
+        except Exception:
+            _log.exception("permission evaluation failed")
+            return None
+        if not requires:
+            return None
+
+        action_id = None
+        store = self._confirmation_store
+        if store is not None:
+            try:
+                action_id = store.create_pending_action(
+                    session_id=self._session_id or "voice-session",
+                    tool=call.tool,
+                    payload=dict(call.payload),
+                    permission_level=level,
+                    task_id=task_id,
+                )
+            except Exception:
+                _log.exception("could not persist pending action")
+                return ToolResult(
+                    tool=call.tool,
+                    success=False,
+                    message="I couldn't safely record that action for confirmation.",
+                    data={"started": False, "completed": False, "verified": False},
+                )
+
+        self.bus.publish(tool_failed(
+            session_id=self._session_id,
+            task_id=task_id,
+            tool=call.tool,
+            error="confirmation required",
+        ))
+        return ToolResult(
+            tool=call.tool,
+            success=False,
+            message="That action is sensitive, so I need your confirmation first.",
+            data={
+                "confirmation_required": True,
+                "action_id": action_id,
+                "started": False,
+                "completed": False,
+                "verified": False,
+            },
+        )
 
     def dry_run(self, call: ToolCall) -> ToolResult:
         """Validate a tool call and describe what would happen without running it."""
@@ -501,10 +577,16 @@ class LiveOrchestrator:
             )
 
         if _is_action_request(user_lower):
+            # Surface bounded, relevant prior execution knowledge to the planner.
+            experiences = self.memory.retrieve_experiences(user_text, limit=3)
             return OrchestratorDecision(
                 kind="action",
                 intent=user_text,
-                metadata={"handled_by": "planner"},
+                metadata={
+                    "handled_by": "planner",
+                    "experiences": experiences,
+                    "context": context,
+                },
             )
 
         memories = self.memory.search_memories(user_text)
@@ -517,9 +599,9 @@ class LiveOrchestrator:
             metadata={"handled_by": "brain", "context": context},
         )
 
-    def plan_action(self, user_text: str) -> Task:
+    def plan_action(self, user_text: str, lessons: list[str] | None = None) -> Task:
         """Plan an action request into a tracked Task."""
-        plan = self.planner.create_plan(user_text)
+        plan = self.planner.create_plan(user_text, lessons=lessons)
         task = Task(
             id=plan.get("goal", "action").replace(" ", "_")[:64],
             goal=plan.get("goal", user_text),

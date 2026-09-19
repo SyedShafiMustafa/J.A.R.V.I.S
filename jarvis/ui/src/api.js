@@ -100,4 +100,19 @@ export const api = {
       body: JSON.stringify({ text }),
     });
   },
+
+  async emergencyStop() {
+    return fetchJson('/stop', { method: 'POST' });
+  },
+
+  async confirmAction(actionId, approve = true) {
+    return fetchJson('/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ action_id: actionId, approve }),
+    });
+  },
+
+  async pendingActions() {
+    return fetchJson('/pending_actions');
+  },
 };

@@ -27,6 +27,7 @@ from backend.bus import (
     task_failed,
     LoggingObserver,
 )
+from backend.models import Session
 from typing import Callable
 
 from backend.bus import (

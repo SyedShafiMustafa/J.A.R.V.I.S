@@ -19,3 +19,6 @@ def _local_llm_by_default(monkeypatch):
 
     monkeypatch.setattr(llm_provider, "LLM_PROVIDER", "ollama", raising=False)
     monkeypatch.setattr(llm_provider, "LLM_FALLBACK", False, raising=False)
+
+
+collect_ignore = ["scripts", "run_voice_test.py"]

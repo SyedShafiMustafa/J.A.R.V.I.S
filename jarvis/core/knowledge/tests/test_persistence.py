@@ -6,18 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from jarvis.core.knowledge.chunkers.models import DocumentChunk
-from jarvis.core.knowledge.chunkers.registry import ChunkerRegistry
-from jarvis.core.knowledge.parsers.base import ParsedDocument
-from jarvis.core.knowledge.parsers.registry import ParserRegistry
-from jarvis.core.knowledge.storage import (
+from core.knowledge.chunkers.models import DocumentChunk
+from core.knowledge.chunkers.registry import ChunkerRegistry
+from core.knowledge.parsers.base import ParsedDocument
+from core.knowledge.parsers.registry import ParserRegistry
+from core.knowledge.storage import (
     ChunkRepository,
     DocumentRepository,
     DocumentVersionRepository,
     IngestionJobRepository,
     KnowledgeDatabase,
 )
-from jarvis.core.knowledge.storage.schema import KnowledgeSchema
+from core.knowledge.storage.schema import KnowledgeSchema
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────

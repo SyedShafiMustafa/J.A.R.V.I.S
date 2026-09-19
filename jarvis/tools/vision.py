@@ -167,6 +167,54 @@ class ScreenVision:
         pyautogui.write(text, interval=0.02)
 
     # ---------------------------------------
+    # Header strip OCR (top of the active window)
+    # ---------------------------------------
+    #
+    # Used to confirm WHICH conversation is open before sending anything.
+    # Reading only the top strip keeps the contact name away from message
+    # bodies and search results, which is exactly what a send guard needs.
+
+    def read_header(self, frac=0.11, x_frac=0.30):
+        """OCR the conversation header (top-right pane).
+
+        The left column is the chat list and the search box, which contain
+        OTHER people's names. Capturing only the right-hand conversation
+        header keeps the guard from comparing against unrelated contacts.
+        """
+
+        win = gw.getActiveWindow()
+
+        if win is None:
+            return ""
+
+        left = max(0, win.left + int(win.width * x_frac))
+        top = max(0, win.top)
+        width = max(1, win.width - int(win.width * x_frac))
+        height = max(1, int(win.height * frac))
+
+        try:
+            image = pyautogui.screenshot(region=(left, top, width, height))
+        except Exception:
+            return ""
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            path = f.name
+
+        image.save(path)
+
+        try:
+            text = pytesseract.image_to_string(Image.open(path))
+        except Exception:
+            text = ""
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        return " ".join(text.split())
+
+    # ---------------------------------------
     # Whole-screen summary (window title + OCR text)
     # ---------------------------------------
 

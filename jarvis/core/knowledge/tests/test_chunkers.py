@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from jarvis.core.knowledge.chunkers.base import ChunkerConfig, ChunkerBase
-from jarvis.core.knowledge.chunkers.markdown import MarkdownChunker
-from jarvis.core.knowledge.chunkers.models import DocumentChunk
-from jarvis.core.knowledge.chunkers.pdf import PdfChunker
-from jarvis.core.knowledge.chunkers.registry import ChunkerRegistry
-from jarvis.core.knowledge.chunkers.text import TextChunker
-from jarvis.core.knowledge.parsers.base import ParsedDocument
+from core.knowledge.chunkers.base import ChunkerConfig, ChunkerBase
+from core.knowledge.chunkers.markdown import MarkdownChunker
+from core.knowledge.chunkers.models import DocumentChunk
+from core.knowledge.chunkers.pdf import PdfChunker
+from core.knowledge.chunkers.registry import ChunkerRegistry
+from core.knowledge.chunkers.text import TextChunker
+from core.knowledge.parsers.base import ParsedDocument
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -516,7 +516,7 @@ def test_chunker_token_count_estimation(text_chunker):
 
 def test_parser_to_chunker_integration(tmp_dir, chunker_registry):
     """End-to-end test: parser → chunker workflow."""
-    from jarvis.core.knowledge.parsers.registry import ParserRegistry
+    from core.knowledge.parsers.registry import ParserRegistry
 
     # Create a test file
     test_file = tmp_dir / "test.txt"

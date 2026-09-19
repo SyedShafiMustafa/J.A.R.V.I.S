@@ -74,11 +74,13 @@ class ComputerController:
         return None
 
     def focus_window(self, title):
-
         windows = gw.getWindowsWithTitle(title)
-
         if windows:
-            windows[0].activate()
+            try:
+                windows[0].activate()
+            except Exception:
+                # pygetwindow on Windows can raise PyGetWindowException even when successful
+                pass
             return True
 
         return False

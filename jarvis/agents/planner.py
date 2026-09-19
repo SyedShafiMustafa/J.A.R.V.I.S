@@ -52,6 +52,45 @@ Special semantic target:
 10. search_google
 {"tool":"search_google","query":"GPT-5"}
 
+11. send_whatsapp (preferred for sending a WhatsApp message to a named contact)
+{"tool":"send_whatsapp","recipient":"Ahmed","message":"I am reaching in 10 minutes"}
+
+12. list_files
+{"tool":"list_files","directory":"."}
+
+13. inspect_file
+{"tool":"inspect_file","path":"report.txt"}
+
+14. create_file
+{"tool":"create_file","path":"report.txt","content":"hello"}
+
+15. edit_file
+{"tool":"edit_file","path":"report.txt","content":"new contents"}
+
+16. move_file
+{"tool":"move_file","src":"a.txt","dst":"b.txt"}
+
+17. search_files
+{"tool":"search_files","directory":".","pattern":"*.py"}
+
+18. delete_file
+{"tool":"delete_file","path":"old.txt"}
+
+19. execute_terminal
+{"tool":"execute_terminal","command":"dir"}
+
+20. git_status / git_diff / git_log / git_branch
+{"tool":"git_status"}
+{"tool":"git_diff"}
+{"tool":"git_log","n":5}
+{"tool":"git_branch"}
+
+21. run_python_script
+{"tool":"run_python_script","script_path":"scripts/foo.py"}
+
+22. run_pytest
+{"tool":"run_pytest","test_path":"core/tests"}
+
 ========================
 RULES
 ========================
@@ -62,6 +101,8 @@ RULES
 - For ANY messaging application, use message_box instead of "Type a message".
 - Preserve contact names exactly.
 - Preserve message text exactly.
+- To send a NEW WhatsApp message to a named contact, prefer the single
+  send_whatsapp step over a click_text/type sequence.
 
 ========================
 EXAMPLES
@@ -137,20 +178,24 @@ Response:
 }
 
 User:
-Open WhatsApp and message Project Hello
+Send Ahmed I am reaching in 10 minutes on WhatsApp
 
 Response:
 {
   "goal":"Send a WhatsApp message",
   "steps":[
-    {"tool":"open_app","app":"whatsapp"},
-    {"tool":"wait_window","title":"WhatsApp"},
-    {"tool":"click_text","text":"Search"},
-    {"tool":"type","text":"Project"},
-    {"tool":"press","key":"enter"},
-    {"tool":"click_text","text":"message_box"},
-    {"tool":"type","text":"Hello"},
-    {"tool":"press","key":"enter"}
+    {"tool":"send_whatsapp","recipient":"Ahmed","message":"I am reaching in 10 minutes"}
+  ]
+}
+
+User:
+Create a file notes.txt with hello
+
+Response:
+{
+  "goal":"Create notes.txt",
+  "steps":[
+    {"tool":"create_file","path":"notes.txt","content":"hello"}
   ]
 }
 """
@@ -163,7 +208,7 @@ class TaskPlanner:
         self.url = getattr(self.provider, "url", None)
         self.model = getattr(self.provider, "model", None)
 
-    def create_plan(self, request: str):
+    def create_plan(self, request: str, lessons: list[str] | None = None):
 
         messages = [
             {
@@ -175,6 +220,22 @@ class TaskPlanner:
                 "content": request
             }
         ]
+
+        # Bounded experience injection: at most a few retrieved lessons, each
+        # truncated, so prior execution knowledge helps without flooding the
+        # prompt (and never leaking the whole experience table).
+        if lessons:
+            bullets = "\n".join(
+                f"- {str(lesson)[:200]}" for lesson in list(lessons)[:3]
+            )
+            if bullets:
+                messages.insert(1, {
+                    "role": "system",
+                    "content": (
+                        "Operational lessons from previous runs. Use a lesson ONLY "
+                        "if it clearly applies to this request:\n" + bullets
+                    ),
+                })
 
         try:
             content = self.provider.complete(messages).strip()
@@ -210,17 +271,35 @@ class TaskPlanner:
         if not isinstance(steps, list) or not steps:
             raise PlannerValidationError("planner steps must be a non-empty array")
 
-        schemas = {
-            "open_app": {"app": str},
-            "wait_window": {"title": str},
-            "click_text": {"text": str},
-            "type": {"text": str},
-            "press": {"key": str},
-            "hotkey": {"keys": list},
-            "close_app": {"app": str},
-            "open_youtube": {},
-            "search_youtube": {"query": str},
-            "search_google": {"query": str},
+        # tool -> (required fields, optional fields). Optional fields may be
+        # omitted but are still validated when present, so a planner step can
+        # never smuggle in an unexpected field.
+        schemas: dict[str, tuple[dict[str, type], dict[str, type]]] = {
+            "open_app": ({"app": str}, {}),
+            "wait_window": ({"title": str}, {}),
+            "click_text": ({"text": str}, {}),
+            "type": ({"text": str}, {}),
+            "press": ({"key": str}, {}),
+            "hotkey": ({"keys": list}, {}),
+            "close_app": ({"app": str}, {}),
+            "open_youtube": ({}, {}),
+            "search_youtube": ({"query": str}, {}),
+            "search_google": ({"query": str}, {}),
+            "send_whatsapp": ({"recipient": str, "message": str}, {}),
+            "list_files": ({}, {"directory": str}),
+            "inspect_file": ({"path": str}, {}),
+            "create_file": ({"path": str}, {"content": str}),
+            "edit_file": ({"path": str, "content": str}, {}),
+            "move_file": ({"src": str, "dst": str}, {}),
+            "search_files": ({"directory": str, "pattern": str}, {}),
+            "delete_file": ({"path": str}, {}),
+            "execute_terminal": ({"command": str}, {"timeout": (int, float), "cwd": str}),
+            "git_status": ({}, {}),
+            "git_diff": ({}, {}),
+            "git_log": ({}, {"n": int}),
+            "git_branch": ({}, {}),
+            "run_python_script": ({"script_path": str}, {"args": list}),
+            "run_pytest": ({}, {"test_path": str}),
         }
         for step in steps:
             if not isinstance(step, dict) or not isinstance(step.get("tool"), str):
@@ -228,12 +307,15 @@ class TaskPlanner:
             tool = step["tool"]
             if tool not in schemas:
                 raise PlannerValidationError(f"planner returned invalid tool: {tool}")
-            expected = schemas[tool]
-            if set(step) - {"tool", *expected}:
+            required, optional = schemas[tool]
+            allowed = {**required, **optional}
+            if set(step) - {"tool", *allowed}:
                 raise PlannerValidationError("planner action contains unexpected fields")
-            if set(expected) - set(step):
+            if set(required) - set(step):
                 raise PlannerValidationError(f"planner action missing fields for {tool}")
-            for field, field_type in expected.items():
+            for field, field_type in allowed.items():
+                if field not in step:
+                    continue
                 value = step[field]
                 if field_type is list:
                     valid = (
@@ -241,6 +323,10 @@ class TaskPlanner:
                         and bool(value)
                         and all(isinstance(item, str) and item.strip() for item in value)
                     )
+                elif field_type == (int, float):
+                    valid = isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+                elif field_type is int:
+                    valid = isinstance(value, int) and not isinstance(value, bool) and value > 0
                 else:
                     valid = isinstance(value, field_type) and bool(value.strip())
                 if not valid:

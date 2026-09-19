@@ -56,6 +56,7 @@ from agents.ollama_errors import OllamaError
 from agents.llm_provider import configured_provider_status, provider_status
 from config.config import CONVERSATION_IDLE_TIMEOUT
 from backend.interfaces import ToolCall
+from backend.models import Task
 from backend.live_runtime import RuntimeUnavailableError, build_live_runtime
 from backend.bus import (
     task_started,
@@ -286,6 +287,19 @@ class JarvisBackendService:
     def stop(self) -> None:
         if self._voice_mode:
             self.stop_listening()
+        if self._runtime is not None:
+            scheduler = self._runtime.get("scheduler")
+            if scheduler is not None:
+                try:
+                    scheduler.stop()
+                except Exception:
+                    _log.exception("scheduler stop failed")
+            store = self._runtime.get("confirmation_store")
+            if store is not None:
+                try:
+                    store.close()
+                except Exception:
+                    _log.exception("confirmation_store close failed")
         if self._http_server is not None:
             try:
                 self._http_server.shutdown()
@@ -431,6 +445,64 @@ class JarvisBackendService:
             self.emit({"type": "status", "status": STATUS_IDLE})
         return 200, {"received": text}
 
+    def handle_stop(self) -> tuple[int, dict[str, Any]]:
+        if self._runtime is not None:
+            lifecycle = self._runtime.get("lifecycle")
+            if lifecycle is not None:
+                try:
+                    lifecycle.emergency_stop()
+                except Exception:
+                    _log.exception("emergency stop lifecycle call failed")
+        if self._voice_mode:
+            self.stop_listening()
+        self.state.set_status(STATUS_IDLE)
+        self._set_phase(PHASE_IDLE)
+        self.emit({"type": "emergency_stop", "ok": True})
+        return 200, {"ok": True, "stopped": True}
+
+    def handle_confirm(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        action_id = payload.get("action_id")
+        approve = payload.get("approve", True)
+        if not action_id:
+            return 400, {"error": "missing action_id"}
+
+        try:
+            runtime = self._get_runtime()
+        except RuntimeUnavailableError as exc:
+            return 503, {"error": str(exc)}
+
+        store = runtime.get("confirmation_store")
+        tool_runner = runtime.get("tool_runner")
+        if store is None:
+            return 503, {"error": "confirmation store unavailable"}
+
+        if approve:
+            result = store.approve_action(action_id, tool_runner=tool_runner)
+            self.emit({"type": "confirmation_resolved", "action_id": action_id, "approved": True})
+            return 200, {
+                "action_id": action_id,
+                "approved": True,
+                "success": result.success,
+                "message": result.message,
+                "data": result.data or {},
+            }
+        else:
+            rejected = store.reject_action(action_id)
+            self.emit({"type": "confirmation_resolved", "action_id": action_id, "approved": False, "rejected": rejected})
+            return 200, {"action_id": action_id, "approved": False, "rejected": rejected}
+
+    def get_pending_actions(self) -> tuple[int, dict[str, Any]]:
+        try:
+            runtime = self._get_runtime()
+        except RuntimeUnavailableError:
+            return 200, {"pending_actions": []}
+
+        store = runtime.get("confirmation_store")
+        if store is None:
+            return 200, {"pending_actions": []}
+        actions = store.list_pending_actions()
+        return 200, {"pending_actions": actions}
+
     # ------------------------------------------------------------------
     # event stream
     # ------------------------------------------------------------------
@@ -481,6 +553,22 @@ class JarvisBackendService:
         self.state.set_transcript(text)
 
         session.note_user(text)
+
+        if _is_emergency_stop_phrase(text):
+            self.handle_stop()
+            return
+
+        if self._handle_schedule_command(runtime, text):
+            return
+
+        # Deterministic WhatsApp send: an explicit "send <name> <message> on
+        # WhatsApp" request is executed directly (verified), not left to the
+        # planner's fuzzy click/type sequence.
+        whatsapp_plan = self._whatsapp_plan(text)
+        if whatsapp_plan is not None:
+            self._run_action(runtime, text, plan=whatsapp_plan)
+            return
+
         decision = orchestrator.decide(text)
         session.note_decision(decision.metadata or {})
 
@@ -498,7 +586,133 @@ class JarvisBackendService:
 
         self._run_chat(runtime, text)
 
-    def _run_action(self, runtime: dict[str, Any], text: str) -> None:
+    def _handle_schedule_command(self, runtime: dict[str, Any], text: str) -> bool:
+        """Handle reminder / recurring / cancel intents. Returns True if handled."""
+        try:
+            from core.scheduler import parse_schedule_request, humanize_seconds
+        except Exception:
+            return False
+
+        parsed = parse_schedule_request(text)
+        if not parsed:
+            return False
+
+        scheduler = (runtime or {}).get("scheduler")
+        if scheduler is None:
+            return False
+        audio = runtime.get("audio")
+
+        if parsed["kind"] == "cancel":
+            cancelled = 0
+            for task in scheduler.list_scheduled_tasks():
+                if scheduler.cancel_task(task["id"]):
+                    cancelled += 1
+            reply = (
+                f"Cancelled {cancelled} reminder{'s' if cancelled != 1 else ''}."
+                if cancelled else "You have no reminders to cancel."
+            )
+            self.emit({"type": "scheduled", "kind": "cancel", "cancelled": cancelled})
+            if audio is not None:
+                self._speak(audio, reply)
+            return True
+
+        action = parsed.get("action_text") or ""
+        if parsed["kind"] == "remind":
+            task_id = scheduler.schedule_task(
+                "reminder", {"remind": action}, delay_seconds=parsed["delay_seconds"]
+            )
+            reply = f"Okay, I'll remind you to {action} in {humanize_seconds(parsed['delay_seconds'])}."
+        else:
+            task_id = scheduler.schedule_task(
+                "recurring_reminder", {"remind": action}, interval_seconds=parsed["interval_seconds"]
+            )
+            reply = f"Okay, I'll remind you to {action} every {humanize_seconds(parsed['interval_seconds'])}."
+
+        self.emit({
+            "type": "scheduled",
+            "task_id": task_id,
+            "kind": parsed["kind"],
+            "action": action,
+        })
+        if audio is not None:
+            self._speak(audio, reply)
+        return True
+
+    def get_scheduled_tasks(self) -> tuple[int, dict[str, Any]]:
+        try:
+            runtime = self._get_runtime()
+        except RuntimeUnavailableError:
+            return 200, {"scheduled_tasks": []}
+        scheduler = runtime.get("scheduler")
+        if scheduler is None:
+            return 200, {"scheduled_tasks": []}
+        return 200, {"scheduled_tasks": scheduler.list_scheduled_tasks()}
+
+    @staticmethod
+    def _whatsapp_plan(text: str) -> dict[str, Any] | None:
+        """Return a single-step send_whatsapp plan for an explicit request.
+
+        Imported lazily so the server module stays importable without the
+        desktop-automation dependencies loaded.
+        """
+        try:
+            from tools.whatsapp import parse_whatsapp_request
+        except Exception:
+            return None
+        parsed = parse_whatsapp_request(text)
+        if not parsed:
+            return None
+        recipient = parsed.get("recipient", "").strip()
+        message = parsed.get("message", "").strip()
+        if not recipient or not message:
+            return None
+        return {
+            "goal": f"Send a WhatsApp message to {recipient}",
+            "steps": [{
+                "tool": "send_whatsapp",
+                "recipient": recipient,
+                "message": message,
+            }],
+        }
+
+    @staticmethod
+    def _lessons_for(memory: Any, text: str) -> list[str]:
+        """Retrieve a few relevant prior lessons as short, prompt-ready strings."""
+        retrieve = getattr(memory, "retrieve_experiences", None)
+        if not callable(retrieve):
+            return []
+        try:
+            entries = retrieve(text, limit=3) or []
+        except Exception:
+            return []
+        lessons = []
+        for entry in entries:
+            scenario = entry.get("scenario", "")
+            lesson = entry.get("lesson", "")
+            outcome = entry.get("outcome", "")
+            if scenario and lesson:
+                lessons.append(f"{scenario} -> {outcome}: {lesson}")
+            elif scenario:
+                lessons.append(f"{scenario} -> {outcome}")
+        return lessons
+
+    @staticmethod
+    def _record_experience(memory: Any, tool: str, payload: dict[str, Any], result: Any) -> None:
+        """Store an operational lesson for this tool outcome (best effort)."""
+        save = getattr(memory, "save_experience", None)
+        if not callable(save):
+            return
+        try:
+            save(
+                scenario=f"tool:{tool}",
+                strategy=json.dumps(payload, default=str)[:300],
+                outcome="success" if getattr(result, "success", False) else "failure",
+                lesson=(getattr(result, "message", "") or "")[:300],
+            )
+        except Exception:
+            _log.debug("experience save failed", exc_info=True)
+
+    def _run_action(self, runtime: dict[str, Any], text: str, plan: dict[str, Any] | None = None) -> None:
         audio = runtime["audio"]
         session = runtime["session"]
         lifecycle = runtime["lifecycle"]
@@ -518,7 +732,21 @@ class JarvisBackendService:
 
         plan_at = time.monotonic()
         try:
-            task = orchestrator.plan_action(text)
+            if plan is not None:
+                task = Task(
+                    id=(plan.get("goal") or "action").replace(" ", "_")[:64],
+                    goal=plan.get("goal") or text,
+                    steps=list(plan.get("steps") or []),
+                )
+            else:
+                lessons = self._lessons_for(memory, text)
+                if lessons:
+                    _timeline_log.info("planner_lessons=%d", len(lessons))
+                    task = orchestrator.plan_action(text, lessons=lessons)
+                else:
+                    # No relevant experience: pass nothing extra so callers
+                    # (and test doubles) without the optional kwarg still work.
+                    task = orchestrator.plan_action(text)
             self._refresh_provider()
             _timeline_log.info(
                 "planner_done_ms=%.0f steps=%d",
@@ -548,6 +776,7 @@ class JarvisBackendService:
         task.start()
 
         try:
+            self._last_action_message = None
             for step in task.steps:
                 if lifecycle.shutdown_requested:
                     session.cancel_active_task()
@@ -558,8 +787,25 @@ class JarvisBackendService:
                     payload={k: v for k, v in step.items() if k != "tool"},
                 )
                 result = tool_runner.run(call, task=task)
+                self._record_experience(memory, call.tool, call.payload, result)
 
                 if not result.success:
+                    if (result.data or {}).get("confirmation_required"):
+                        action_id = (result.data or {}).get("action_id")
+                        prompt = (
+                            result.message
+                            or "I need your confirmation before doing that."
+                        )
+                        self.emit({
+                            "type": "confirmation_required",
+                            "action_id": action_id,
+                            "tool": call.tool,
+                        })
+                        task.fail("confirmation required")
+                        self._speak(audio, prompt)
+                        if conversation_id:
+                            memory.save_message(conversation_id, "assistant", prompt)
+                        return
                     task.fail(result.message or "tool failed")
                     bus.publish(task_failed(task, session_id=session.id))
                     failure = result.message or "tool execution failed"
@@ -570,11 +816,18 @@ class JarvisBackendService:
                         memory.save_message(conversation_id, "assistant", "I couldn't complete that task.")
                     return
 
+                # Tools carry their own verification language; use it verbatim.
+                self._last_action_message = result.message or "Done."
+
             task.complete("done")
             bus.publish(task_completed(task, session_id=session.id))
-            self._speak(audio, "Done.")
+            # Prefer the tool's own verified message over a generic "Done."
+            # so JARVIS never claims an outcome it did not observe.
+            spoken = self._last_action_message or "Done."
+            self._last_action_message = None
+            self._speak(audio, spoken)
             if conversation_id:
-                memory.save_message(conversation_id, "assistant", "Done.")
+                memory.save_message(conversation_id, "assistant", spoken)
                 memory.maybe_summarize(conversation_id)
         except Exception as exc:
             _log.exception("action failed")
@@ -893,6 +1146,33 @@ class JarvisBackendService:
                     return
 
                 session.note_user(user)
+
+                # Reminders / recurring schedules via the normal voice surface.
+                if self._handle_schedule_command(runtime, user):
+                    timeout = time.monotonic() + idle_window
+                    continue
+
+                # Deterministic WhatsApp send (verified, no extra confirmation
+                # for an explicit user request).
+                whatsapp_plan = self._whatsapp_plan(user)
+                if whatsapp_plan is not None:
+                    self._run_action(runtime, user, plan=whatsapp_plan)
+                    timeout = time.monotonic() + idle_window
+                    continue
+
+                # Emergency stop: immediate halt of the active turn.
+                if _is_emergency_stop_phrase(user):
+                    interrupt = runtime.get("lifecycle")
+                    if interrupt is not None:
+                        try:
+                            interrupt.emergency_stop()
+                        except Exception:
+                            _log.exception("emergency stop failed")
+                    self._speak(audio, "Stopped.")
+                    self._set_phase(PHASE_WAKE_LISTENING)
+                    _timeline_log.info("emergency_stop phrase=%r", user)
+                    return
+
                 self._set_phase(PHASE_THINKING)
                 decision = orchestrator.decide(user)
                 session.note_decision(decision.metadata or {})
@@ -987,6 +1267,32 @@ def _is_shutdown_phrase(text: str) -> bool:
     return any(p in cleaned for p in _SHUTDOWN_PHRASES)
 
 
+# Immediate-stop phrases. Exact matches only, so ordinary sentences that merely
+# contain the word "stop" do not trigger it. "stop listening" is handled by the
+# conversation-exit check, which runs first.
+_EMERGENCY_STOP_PHRASES = {
+    "stop",
+    "stop it",
+    "stop now",
+    "stop everything",
+    "jarvis stop",
+    "stop jarvis",
+    "abort",
+    "abort that",
+    "emergency stop",
+    "halt",
+    "halt jarvis",
+    "cancel that",
+}
+
+
+def _is_emergency_stop_phrase(text: str) -> bool:
+    cleaned = _normalize_phrase(text)
+    if "emergency stop" in cleaned:
+        return True
+    return cleaned in _EMERGENCY_STOP_PHRASES
+
+
 # ---------------------------------------------------------------------------
 # HTTP handler (also serves WebSocket upgrades on the same port)
 # ---------------------------------------------------------------------------
@@ -1011,6 +1317,12 @@ def _make_handler(service: JarvisBackendService):
                 return
             if self.path == "/api/state":
                 self._respond(*self._service._state_response())
+                return
+            if self.path in ("/api/pending_actions", "/api/confirmations"):
+                self._respond(*self._service.get_pending_actions())
+                return
+            if self.path in ("/api/scheduled", "/api/reminders"):
+                self._respond(*self._service.get_scheduled_tasks())
                 return
 
             self._respond(404, {"error": "not found"})
@@ -1042,6 +1354,12 @@ def _make_handler(service: JarvisBackendService):
                 return
             if self.path == "/api/listen/stop":
                 self._respond(*self._service.stop_listening())
+                return
+            if self.path == "/api/stop":
+                self._respond(*self._service.handle_stop())
+                return
+            if self.path == "/api/confirm":
+                self._respond(*self._service.handle_confirm(payload))
                 return
             if self.path == "/api/command":
                 self._respond(*self._service.handle_command(payload))

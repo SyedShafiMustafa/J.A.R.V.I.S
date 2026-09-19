@@ -77,6 +77,23 @@ class Lifecycle:
             if callback not in self._cleanup_callbacks:
                 self._cleanup_callbacks.append(callback)
 
+    def emergency_stop(self) -> None:
+        """
+        Immediate emergency stop mechanism:
+        - Stop active task
+        - Run cleanups (stop audio, stop speaking, release mic)
+        - Publish emergency.stop event
+        """
+        log_info("backend.lifecycle", "EMERGENCY STOP TRIGGERED")
+        with self._lock:
+            self._session.cancel_active_task()
+        self._run_cleanups()
+        self._bus.publish(BackendEvent(
+            kind="emergency.stop",
+            session_id=self._session.id,
+            meta={"stopped": True},
+        ))
+
     def shutdown(self) -> None:
         """
         Run cleanup callbacks and announce session end.
