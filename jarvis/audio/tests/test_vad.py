@@ -245,3 +245,117 @@ def test_no_speech_timeout_with_buffered_content_still_cleans_up(monkeypatch):
         vad.VoiceRecorder(max_duration=1, speech_wait_timeout=0.05).record()
 
     assert stream.stopped and stream.closed
+
+
+# --- no-speech guard: continuously-delivering (live-mic-like) stream -------
+
+
+class ContinuousStream:
+    """Fake mic that keeps delivering blocks in real time until stopped.
+
+    Models a live microphone where the block queue is never empty, so
+    ``queue.Empty`` never fires and the old guard inside that branch could
+    not run.
+    """
+
+    def __init__(self, value, loud_blocks=0, interval=0.005):
+        self.value = value
+        self.loud_blocks = loud_blocks
+        self.interval = interval
+        self.callback = None
+        self.started = False
+        self.stopped = False
+        self.closed = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self.started = True
+
+        def run():
+            for _ in range(self.loud_blocks):
+                if self._stop.is_set():
+                    return
+                self.callback(audio_batch(0.02), 32, None, None)
+                time.sleep(self.interval)
+            while not self._stop.is_set():
+                self.callback(
+                    np.full((32, 1), self.value, dtype=np.float32),
+                    32,
+                    None,
+                    None,
+                )
+                time.sleep(self.interval)
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self.stopped = True
+        self._stop.set()
+
+    def close(self):
+        self.closed = True
+        self._stop.set()
+
+
+def install_continuous_stream(monkeypatch, value):
+    stream = ContinuousStream(value)
+
+    def make_stream(**kwargs):
+        stream.callback = kwargs["callback"]
+        return stream
+
+    monkeypatch.setattr(vad.sd, "InputStream", make_stream)
+    monkeypatch.setattr(vad.sf, "write", lambda *args, **kwargs: None)
+    monkeypatch.setattr(vad.tempfile, "NamedTemporaryFile", lambda **kwargs: type(
+        "Temp", (), {"name": "capture.wav"}
+    )())
+    return stream
+
+
+def test_continuous_silent_mic_times_out_at_speech_wait_not_max_duration(monkeypatch):
+    # A real mic never lets the block queue go empty, so the old guard
+    # (inside `except queue.Empty`) could never fire and the recorder ran to
+    # max_duration. With the guard at the top of the loop, a continuously
+    # silent mic must raise NoSpeechError near speech_wait_timeout.
+    stream = install_continuous_stream(monkeypatch, value=0.001)
+
+    started_at = time.monotonic()
+    with pytest.raises(vad.NoSpeechError):
+        vad.VoiceRecorder(max_duration=30, speech_wait_timeout=0.3).record()
+    elapsed = time.monotonic() - started_at
+
+    # Fires at ~0.3 s, far below the 30 s maximum capture duration.
+    assert 0.25 <= elapsed < 5, f"timed out after {elapsed:.3f}s"
+    assert stream.stopped and stream.closed
+
+
+def test_continuous_stream_with_speech_still_records_and_stops(monkeypatch):
+    # The new top-of-loop guard must not abort a valid recording: once the
+    # speech-start trigger fires, continuously delivered blocks are recorded
+    # until the silence stop.
+    stream = ContinuousStream(0.0, loud_blocks=12)
+
+    def make_stream(**kwargs):
+        stream.callback = kwargs["callback"]
+        return stream
+
+    monkeypatch.setattr(vad.sd, "InputStream", make_stream)
+    captured = {}
+
+    def capture_write(path, data, samplerate):
+        captured["data"] = np.asarray(data).flatten()
+
+    monkeypatch.setattr(vad.sf, "write", capture_write)
+    monkeypatch.setattr(vad.tempfile, "NamedTemporaryFile", lambda **kwargs: type(
+        "Temp", (), {"name": "capture.wav"}
+    )())
+
+    path = vad.VoiceRecorder(max_duration=5, speech_wait_timeout=2).record()
+
+    assert path == "capture.wav"
+    assert stream.stopped and stream.closed
+    # The recorded audio contains the 12 loud blocks plus trailing silence
+    # (after the flushed pre-buffer); the guard must not abort a live turn.
+    assert captured["data"].size >= 12 * 32

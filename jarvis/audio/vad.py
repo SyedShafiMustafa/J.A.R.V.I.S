@@ -75,6 +75,12 @@ class VoiceRecorder:
                     raise RecordingCancelledError("recording cancelled")
                 if elapsed >= self.max_duration:
                     raise RecordingTimeoutError("maximum recording duration reached")
+                # No-speech guard is checked every iteration, not only when the
+                # block queue is empty: a live microphone keeps delivering
+                # blocks (ambient noise), so queue.Empty never fires and the
+                # wait would otherwise run until max_duration.
+                if not started and elapsed >= self.speech_wait_timeout:
+                    raise NoSpeechError("no speech detected before timeout")
 
                 try:
                     data = q.get(timeout=0.1)
