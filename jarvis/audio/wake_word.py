@@ -94,8 +94,10 @@ class WakeWordDetector:
             stream.start()
             if self.on_started is not None:
                 self.on_started()
-            while not stop_event.wait(0.1):
-                pass
+            # Block on the stop event (no 100 ms poll), so the microphone
+            # stream is released immediately on stop and the wake->command
+            # handoff does not pay an extra polling delay.
+            stop_event.wait()
         except Exception as exc:
             self._report_error(exc)
             raise

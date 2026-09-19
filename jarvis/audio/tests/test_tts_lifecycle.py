@@ -81,8 +81,12 @@ def test_stop_during_playback_drains_queue_and_closes_stream(monkeypatch):
             self.writes.append(audio)
             gate.wait(timeout=1)
 
-    monkeypatch.setattr(tts.sd, "OutputStream", BlockingStream)
+    # make_tts() installs FakeStream; apply the blocking stream AFTER it so
+    # playback actually blocks and the stop-during-playback contract is
+    # exercised deterministically (previously an artificial post-write sleep
+    # hid this race).
     engine = make_tts(monkeypatch)
+    monkeypatch.setattr(tts.sd, "OutputStream", BlockingStream)
     engine.speak("active")
     engine.speak("stale")
     deadline = time.monotonic() + 1

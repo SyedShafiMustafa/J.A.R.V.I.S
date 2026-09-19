@@ -28,12 +28,19 @@ class RecordingCancelledError(RecordingOutcomeError):
 class VoiceRecorder:
 
     def __init__(self, max_duration=30.0, speech_wait_timeout=5.0, speech_start_frames=12,
-                 pre_buffer_seconds=1.0):
+                 pre_buffer_seconds=1.0, speech_threshold=0.015, silence_threshold=0.008,
+                 silence_frames=16):
         self.sample_rate = 16000
         self.channels = 1
         self.max_duration = max_duration
         self.speech_wait_timeout = speech_wait_timeout
         self.speech_start_frames = speech_start_frames
+        # Absolute floors. A block counts as speech above speech_threshold;
+        # end-of-speech fires after silence_frames quiet blocks. The effective
+        # end-of-speech level adapts upward in a noisy room (see record()).
+        self.speech_threshold = speech_threshold
+        self.silence_threshold = silence_threshold
+        self.silence_frames = silence_frames
         # Audio captured just before speech is confirmed is kept here so the
         # first word is not clipped while the speech_start_frames threshold
         # accumulates.
@@ -59,6 +66,8 @@ class VoiceRecorder:
         silence = 0
         started = False
         speech_frames = 0
+        # Slow estimate of the room's ambient level, measured before speech.
+        ambient = 0.0
 
         cancel_event = cancel_event or threading.Event()
         started_at = time.monotonic()
@@ -93,13 +102,24 @@ class VoiceRecorder:
 
                 volume = np.abs(audio).mean()
 
+                # Ambient (room-noise) estimate, tracked only before speech is
+                # detected and only on non-speech-loud blocks, so the utterance
+                # itself cannot inflate it.
+                if not started and volume <= self.speech_threshold:
+                    ambient += (volume - ambient) * 0.05
+
+                # End-of-speech level: the fixed floor, raised above a noisy
+                # room's ambient level so fan/HVAC/keyboard noise cannot keep
+                # the recording alive until max_duration.
+                silence_level = max(self.silence_threshold, ambient * 1.5)
+
                 # Speech-start accumulator: sustained speech fills one block
                 # at a time (same onset confirmation as before), but brief
                 # dips (word gaps) decay instead of erasing progress. Natural
                 # speech rarely holds 12 *consecutive* loud blocks — with a
                 # hard reset the trigger often never fires at all and the
                 # utterance is lost entirely.
-                if volume > 0.015:
+                if volume > self.speech_threshold:
                     speech_frames += 1
                 else:
                     speech_frames = max(speech_frames - 1, 0)
@@ -115,19 +135,20 @@ class VoiceRecorder:
                     while pre_buffer_samples > max_pre_samples and pre_buffer:
                         pre_buffer_samples -= len(pre_buffer.popleft())
 
-                if started and volume > 0.015:
-                    silence = 0
-
                 if started:
                     recording.append(audio)
 
-                if started and volume < 0.008:
-                    silence += 1
-                else:
-                    silence = 0
+                # End-of-speech counter: quiet blocks advance it, louder
+                # blocks decay it. Decaying (rather than hard-resetting) lets
+                # isolated room-noise spikes pass without erasing progress,
+                # while still requiring ~0.4 s of sustained quiet to stop.
+                if started:
+                    if volume < silence_level:
+                        silence += 1
+                    else:
+                        silence = max(silence - 1, 0)
 
-                # ~0.5 second silence
-                if started and silence > 15:
+                if started and silence >= self.silence_frames:
                     break
         finally:
             try:

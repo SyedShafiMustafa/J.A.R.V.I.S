@@ -24,10 +24,19 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 # --- LLM brain ---
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")      # "ollama" or "openai"
+# OpenAI-compatible provider settings (only used when LLM_PROVIDER=openai).
+# Keys are never hardcoded — set them in .env. Ollama stays the local fallback.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")            # e.g. https://api.openai.com/v1
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "")                 # cloud model name
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.3"))
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
 OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "30"))
+# How long Ollama keeps the model loaded between requests. Longer = the first
+# reply after an idle gap stays warm, at the cost of holding the model in RAM.
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 OLLAMA_MAX_RETRIES = int(os.getenv("OLLAMA_MAX_RETRIES", "2"))
 OLLAMA_RETRY_DELAY = float(os.getenv("OLLAMA_RETRY_DELAY", "0.25"))
 

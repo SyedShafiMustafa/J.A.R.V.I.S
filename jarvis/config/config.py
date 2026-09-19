@@ -11,10 +11,15 @@ so existing imports like `from config.config import OLLAMA_MODEL` keep working.
 from pathlib import Path
 
 from config.settings import (
-    LLM_PROVIDER,          # "ollama" or "openai"
+    LLM_PROVIDER,          # "ollama" or "openai" (OpenAI-compatible)
+    LLM_BASE_URL,          # cloud endpoint (empty for Ollama)
+    LLM_API_KEY,           # never hardcoded; .env only
+    LLM_MODEL,             # cloud model name
+    LLM_TEMPERATURE,
     OLLAMA_MODEL,          # from .env, defaults to qwen2.5:3b
     OLLAMA_URL,            # Ollama/Qwen provider endpoint (from .env)
     OLLAMA_TIMEOUT,
+    OLLAMA_KEEP_ALIVE,
     OLLAMA_MAX_RETRIES,
     OLLAMA_RETRY_DELAY,
     OPENAI_API_KEY,

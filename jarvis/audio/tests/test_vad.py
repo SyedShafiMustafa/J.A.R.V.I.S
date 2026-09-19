@@ -359,3 +359,58 @@ def test_continuous_stream_with_speech_still_records_and_stops(monkeypatch):
     # The recorded audio contains the 12 loud blocks plus trailing silence
     # (after the flushed pre-buffer); the guard must not abort a live turn.
     assert captured["data"].size >= 12 * 32
+
+
+# --- noise robustness: end-of-speech must not stall in a noisy room --------
+
+
+def test_noisy_room_end_of_speech_stops_before_max_duration(monkeypatch):
+    # Ambient noise at 0.009 sits just above the absolute 0.008 silence floor.
+    # With a fixed floor it resets the silence counter forever and the
+    # recording runs to max_duration; the adaptive end-of-speech level
+    # (ambient * 1.5) must let it stop promptly once speech ends.
+    batches = (
+        [audio_batch(0.009)] * 40     # ambient room noise
+        + [audio_batch(0.03)] * 12    # speech -> trigger
+        + [audio_batch(0.009)] * 40   # ambient returns -> should stop
+    )
+    stream = install_stream(monkeypatch, batches)
+
+    path = vad.VoiceRecorder(max_duration=5, speech_wait_timeout=2).record()
+
+    assert path == "capture.wav"
+    assert stream.stopped and stream.closed
+
+
+def test_transient_noise_spikes_do_not_block_end_of_speech(monkeypatch):
+    # A quiet room with periodic loud transients: the old hard reset cleared
+    # the silence counter on every spike, so 16 consecutive quiet blocks were
+    # never reached and the recording ran to max_duration. Decaying the
+    # counter lets it still reach the threshold.
+    spikes = [audio_batch(0.0)] * 5 + [audio_batch(0.02)]
+    batches = [audio_batch(0.03)] * 12 + spikes * 5
+    stream = install_stream(monkeypatch, batches)
+
+    path = vad.VoiceRecorder(max_duration=5, speech_wait_timeout=2).record()
+
+    assert path == "capture.wav"
+    assert stream.stopped and stream.closed
+
+
+def test_ambient_raises_end_of_speech_level(monkeypatch):
+    # Direct unit check of the adaptive level: with ambient noise tracked at
+    # ~0.009, the effective end-of-speech threshold is the fixed floor raised
+    # to ambient * 1.5 (~0.0135), so 0.009 blocks count as silence.
+    batches = (
+        [audio_batch(0.009)] * 120
+        + [audio_batch(0.03)] * 12
+        + [audio_batch(0.009)] * 40
+    )
+    install_stream(monkeypatch, batches)
+
+    captured = capture_written_audio(monkeypatch)
+
+    # Must stop (not raise RecordingTimeoutError) despite 0.009 ambient blocks
+    # exceeding the absolute 0.008 silence floor.
+    vad.VoiceRecorder(max_duration=5, speech_wait_timeout=2).record()
+    assert captured["data"].size > 0

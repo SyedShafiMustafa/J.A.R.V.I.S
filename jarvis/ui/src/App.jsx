@@ -4,6 +4,7 @@ import { api, connectWebSocket, disconnectWebSocket } from './api';
 export default function App() {
   const [status, setStatus] = useState('offline');
   const [phase, setPhase] = useState('IDLE');
+  const [voiceStopped, setVoiceStopped] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [reply, setReply] = useState('');
   const [toolEvents, setToolEvents] = useState([]);
@@ -133,8 +134,12 @@ export default function App() {
   }, [transcript, pushActivity, pushToolEvent]);
 
   const visiblePhase = !healthOk || !connected ? 'OFFLINE' : phase;
+  // While the voice loop is armed and nothing else is happening, the resting
+  // state IS wake listening. Do not surface a bare "IDLE" as the primary
+  // voice state; a deliberate stop via the central J still shows IDLE.
+  const displayPhase = visiblePhase === 'IDLE' && !voiceStopped ? 'WAKE_LISTENING' : visiblePhase;
   const listeningPhases = new Set(['WAKE_LISTENING', 'WAKE_DETECTED', 'CAPTURING', 'TRANSCRIBING']);
-  const listening = listeningPhases.has(visiblePhase);
+  const listening = listeningPhases.has(displayPhase);
 
   useEffect(() => {
     let cancelled = false;
@@ -210,12 +215,14 @@ export default function App() {
 
   const toggleListening = async () => {
     if (listening) {
+      setVoiceStopped(true);
       try {
         await api.stopListening();
       } catch (err) {
         setErrorMessage(err.message || 'Stop failed');
       }
     } else {
+      setVoiceStopped(false);
       try {
         await api.startListening();
       } catch (err) {
@@ -237,7 +244,7 @@ export default function App() {
     SPEAKING: { label: 'SPEAKING', detail: 'Responding...' },
     STOPPING: { label: 'STOPPING', detail: 'Releasing voice resources...' },
     ERROR: { label: 'ERROR', detail: 'Attention required' },
-  }[visiblePhase] || { label: 'OFFLINE', detail: 'Backend connection unavailable' };
+  }[displayPhase] || { label: 'OFFLINE', detail: 'Backend connection unavailable' };
   const activity = activityEvents.length ? activityEvents : [{ label: 'SYSTEM READY', detail: 'Awaiting activity', time: Date.now() }];
 
   return (
@@ -269,7 +276,7 @@ export default function App() {
               <div className="telemetry-row"><span>MEMORY</span><strong>N/A</strong></div>
               <div className="telemetry-row"><span>NETWORK</span><strong className={healthOk ? 'good' : ''}>{healthOk ? 'CONNECTED' : 'N/A'}</strong></div>
               <div className="telemetry-row"><span>MICROPHONE</span><strong className={listening ? 'good' : ''}>{listening ? 'ACTIVE' : 'READY'}</strong></div>
-              <div className="telemetry-row"><span>WAKE DETECTOR</span><strong className={visiblePhase === 'WAKE_LISTENING' ? 'good' : ''}>{visiblePhase === 'WAKE_LISTENING' ? 'ACTIVE' : 'IDLE'}</strong></div>
+              <div className="telemetry-row"><span>WAKE DETECTOR</span><strong className={displayPhase === 'WAKE_LISTENING' ? 'good' : ''}>{displayPhase === 'WAKE_LISTENING' ? 'ACTIVE' : 'IDLE'}</strong></div>
             </div>
             <div className="telemetry-divider" />
             <div className="panel-label">VOICE SUBSYSTEM <span>02</span></div>

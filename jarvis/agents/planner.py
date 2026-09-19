@@ -2,6 +2,7 @@ import json
 
 from config.config import OLLAMA_URL, OLLAMA_MODEL
 from agents.ollama_client import post_with_retries
+from agents.llm_provider import build_llm_provider
 from agents.ollama_errors import OllamaError, OllamaMalformedResponseError, PlannerValidationError
 
 
@@ -158,40 +159,29 @@ Response:
 class TaskPlanner:
 
     def __init__(self):
-        self.url = OLLAMA_URL.replace("/generate", "/chat")
-        self.model = OLLAMA_MODEL
+        self.provider = build_llm_provider()
+        self.url = getattr(self.provider, "url", None)
+        self.model = getattr(self.provider, "model", None)
 
     def create_plan(self, request: str):
 
-        payload = {
-            "model": self.model,
-            "stream": False,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": request
-                }
-            ],
-            "options": {
-                "temperature": 0
+        messages = [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            },
+            {
+                "role": "user",
+                "content": request
             }
-        }
+        ]
 
         try:
-            response = post_with_retries(self.url, json=payload, stream=False)
+            content = self.provider.complete(messages).strip()
         except OllamaError:
             raise
-
-        try:
-            content = response.json()["message"]["content"].strip()
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise OllamaMalformedResponseError("invalid Ollama planner response") from exc
-        finally:
-            response.close()
+            raise OllamaMalformedResponseError("invalid planner response") from exc
 
         # Remove markdown if Ollama adds it
         if content.startswith("```"):

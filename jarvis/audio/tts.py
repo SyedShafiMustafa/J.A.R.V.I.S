@@ -63,12 +63,11 @@ class TextToSpeech:
                             except Exception:
                                 # A broken hook must never kill speech output.
                                 pass
+                        # PortAudio's blocking write already waits for the
+                        # buffered audio to play; the previous post-write
+                        # sleep loop waited a second full duration, making
+                        # every utterance take ~2x its audio length.
                         stream.write(audio)
-                        chunk_duration = len(audio) / self.sample_rate
-                        elapsed = 0.0
-                        while elapsed < chunk_duration and not self._stop_event.is_set():
-                            time.sleep(0.02)
-                            elapsed += 0.02
                     finally:
                         try:
                             stream.stop()
