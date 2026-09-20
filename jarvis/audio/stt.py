@@ -4,10 +4,10 @@ from faster_whisper import WhisperModel
 
 # Model tier is resolved from the environment at construction time.
 # config.settings (imported below) runs load_dotenv(), so any
-# WHISPER_MODEL=... line in .env is honored here. "base" is the
+# WHISPER_MODEL=... line in .env is honored here. "small.en" is the
 # latency-oriented default for JARVIS's short-command workload;
 # set WHISPER_MODEL=large-v3-turbo in .env to restore the old tier.
-DEFAULT_WHISPER_MODEL = "base"
+DEFAULT_WHISPER_MODEL = "small.en"
 
 # Greedy decoding: a single decode path is ~2-3x faster than beam search
 # with no measurable accuracy loss on 1-2 sentence voice commands.
