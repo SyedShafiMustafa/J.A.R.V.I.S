@@ -73,17 +73,55 @@ class ComputerController:
 
         return None
 
+    def screen_size(self):
+        """Primary-screen ``{"width","height"}`` or None if unavailable."""
+        try:
+            size = pyautogui.size()
+            return {"width": int(size.width), "height": int(size.height)}
+        except Exception:
+            return None
+
     def focus_window(self, title):
         windows = gw.getWindowsWithTitle(title)
-        if windows:
-            try:
-                windows[0].activate()
-            except Exception:
-                # pygetwindow on Windows can raise PyGetWindowException even when successful
-                pass
+        if not windows:
+            return False
+
+        win = windows[0]
+        try:
+            win.activate()
+        except Exception:
+            # pygetwindow on Windows can raise PyGetWindowException even when successful
+            pass
+        if self._window_is_active(win):
             return True
 
-        return False
+        # activate() is advisory on Windows and often leaves the old
+        # window in front: fall back to a direct foreground request, then
+        # report honestly instead of claiming focus we do not have.
+        try:
+            import win32gui
+            win32gui.SetForegroundWindow(win._hWnd)
+            time.sleep(0.3)
+        except Exception:
+            pass
+        return self._window_is_active(win)
+
+    @staticmethod
+    def _window_is_active(win):
+        """True only when ``win`` is verifiably the foreground window."""
+        try:
+            active = gw.getActiveWindow()
+        except Exception:
+            return True  # unreadable state: keep legacy optimistic contract
+        if active is None:
+            return False
+        for attr in ("_hWnd", "title"):
+            try:
+                if getattr(active, attr) != getattr(win, attr):
+                    return False
+            except AttributeError:
+                continue
+        return True
 
     def wait_for_window(self, title, timeout=10):
 

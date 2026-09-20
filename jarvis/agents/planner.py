@@ -100,6 +100,30 @@ Special semantic target:
 25. organize_directory (clean up a folder by type/date/year/extension/age)
 {"tool":"organize_directory","directory":"downloads","strategy":"by_type","dry_run":true}
 
+26. screenshot (observe the screen: active window, full screen, or a region)
+{"tool":"screenshot","mode":"active"}
+
+27. inspect_screen (understand the screen: window, app, UI elements)
+{"tool":"inspect_screen","mode":"active"}
+
+28. locate_target (find a UI target by language; refuses when uncertain)
+{"tool":"locate_target","target":"the Save button"}
+
+29. visual_click (locate, click, re-observe and verify)
+{"tool":"visual_click","target":"the Save button","button":"left"}
+
+30. visual_type (focus a field when given, type, re-observe and verify)
+{"tool":"visual_type","target":"the search box","text":"Python"}
+
+31. visual_drag (drag from one located target onto another)
+{"tool":"visual_drag","target":"the file","to_target":"the folder"}
+
+32. visual_scroll (scroll the wheel; negative scrolls down)
+{"tool":"visual_scroll","amount":-480}
+
+33. visual_verify (re-observe and check an expected visual state)
+{"tool":"visual_verify","kind":"text_visible","text":"Hello"}
+
 ========================
 RULES
 ========================
@@ -107,6 +131,10 @@ RULES
 - Return ONLY JSON.
 - For desktop apps use open_app then wait_window.
 - Use click_text for visible UI elements.
+- Prefer a reliable native/direct tool (open_app, type, press, click_text,
+  send_whatsapp) when one exists; use the visual_* tools when no direct
+  tool fits or the outcome must be visually verified.
+- Never invent screen coordinates: visual tools locate targets by language.
 - For ANY messaging application, use message_box instead of "Type a message".
 - Preserve contact names exactly.
 - Preserve message text exactly.
@@ -315,6 +343,28 @@ class TaskPlanner:
                 {"directory": str},
                 {"strategy": str, "dry_run": bool, "older_than_days": int, "recursive": bool},
             ),
+            "screenshot": ({}, {"mode": str, "region": dict}),
+            "inspect_screen": ({}, {"mode": str}),
+            "locate_target": ({"target": str}, {"min_confidence": (int, float)}),
+            "visual_click": (
+                {"target": str},
+                {"button": str, "min_confidence": (int, float),
+                 "expected_window": str, "verify_text": str},
+            ),
+            "visual_type": (
+                {"text": str},
+                {"target": str, "min_confidence": (int, float),
+                 "expected_window": str, "verify_text": str},
+            ),
+            "visual_drag": (
+                {"target": str, "to_target": str},
+                {"min_confidence": (int, float)},
+            ),
+            "visual_scroll": ({"amount": int}, {}),
+            "visual_verify": (
+                {"kind": str},
+                {"text": str, "title": str},
+            ),
         }
         for step in steps:
             if not isinstance(step, dict) or not isinstance(step.get("tool"), str):
@@ -332,7 +382,15 @@ class TaskPlanner:
                 if field not in step:
                     continue
                 value = step[field]
-                if field_type is list:
+                if tool == "visual_scroll" and field == "amount":
+                    # Wheel direction is signed: positive scrolls up,
+                    # negative scrolls down; zero is a harmless no-op.
+                    valid = (
+                        isinstance(value, int) and not isinstance(value, bool)
+                    )
+                elif field_type is dict:
+                    valid = isinstance(value, dict) and bool(value)
+                elif field_type is list:
                     valid = (
                         isinstance(value, list)
                         and bool(value)

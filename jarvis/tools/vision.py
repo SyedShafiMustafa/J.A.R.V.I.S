@@ -91,6 +91,106 @@ class ScreenVision:
         return img, (left, top)
 
     # ---------------------------------------
+    # Structured capture (Milestone 3): full / active / region
+    # ---------------------------------------
+
+    def capture_shot(self, mode="active", region=None):
+        """Capture the screen into a structured envelope.
+
+        ``mode`` is ``"active"`` (focused window), ``"full"`` (primary
+        screen) or ``"region"`` (explicit ``{"x","y","width","height"}``
+        dict, clamped to non-negative sizes). Never raises: failures come
+        back as ``{"ok": False, "error": ...}`` so visual loops can
+        recover instead of crashing.
+        """
+        try:
+            if mode == "full":
+                image = pyautogui.screenshot()
+                origin = (0, 0)
+            elif mode == "region":
+                x = max(0, int(region["x"]))
+                y = max(0, int(region["y"]))
+                w = max(1, int(region["width"]))
+                h = max(1, int(region["height"]))
+                image = pyautogui.screenshot(region=(x, y, w, h))
+                origin = (x, y)
+            else:
+                image, origin = self.capture()
+
+            width, height = image.size
+
+            return {
+                "ok": True,
+                "image": image,
+                "origin": origin,
+                "width": width,
+                "height": height,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:200]}
+
+    def read_shot_elements(self, image, origin=(0, 0), min_conf=50):
+        """OCR ``image`` (PIL, in memory — no temp files) with coordinates.
+
+        Returns ``[{text, x, y, w, h, cx, cy, confidence}]`` where
+        ``(x, y)`` is the absolute screen origin of the word box and
+        ``(cx, cy)`` its center. Same filtering contract as
+        ``read_elements`` so both paths rank identically.
+        """
+        try:
+            data = pytesseract.image_to_data(
+                image,
+                output_type=pytesseract.Output.DICT
+            )
+        except Exception:
+            return []
+
+        ox, oy = origin
+        elements = []
+
+        for i in range(len(data["text"])):
+
+            text = (data["text"][i] or "").strip()
+
+            if not text:
+                continue
+
+            try:
+                conf = int(float(data["conf"][i]))
+            except (TypeError, ValueError):
+                conf = 0
+
+            if conf < min_conf:
+                continue
+
+            x = data["left"][i]
+            y = data["top"][i]
+            w = data["width"][i]
+            h = data["height"][i]
+
+            elements.append({
+                "text": text,
+                "x": ox + x,
+                "y": oy + y,
+                "w": w,
+                "h": h,
+                "cx": ox + x + w // 2,
+                "cy": oy + y + h // 2,
+                "confidence": conf
+            })
+
+        return elements
+
+    def shot_text(self, image):
+        """Whitespace-normalized OCR string for one in-memory image."""
+        try:
+            text = pytesseract.image_to_string(image)
+        except Exception:
+            return ""
+
+        return " ".join(text.split())
+
+    # ---------------------------------------
     # OCR with coordinates
     # ---------------------------------------
 

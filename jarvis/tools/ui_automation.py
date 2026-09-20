@@ -17,6 +17,24 @@ class UIAutomation:
         app = Application(backend="uia").connect(handle=hwnd)
         return app.window(handle=hwnd)
 
+    def safe_inspect(self):
+        """``inspect()`` that returns [] instead of raising.
+
+        Visual loops must survive windows with unreadable trees
+        (elevated apps, closing windows) and fall back to OCR.
+        """
+        try:
+            return self.inspect()
+        except Exception:
+            return []
+
+    def foreground_title(self):
+        """Foreground window title, or None if it cannot be read."""
+        try:
+            return win32gui.GetWindowText(win32gui.GetForegroundWindow()) or None
+        except Exception:
+            return None
+
     # -------------------------------
     # Get meaningful controls only
     # -------------------------------

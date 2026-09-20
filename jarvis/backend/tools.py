@@ -242,6 +242,92 @@ def build_default_tool_registry() -> ToolRegistry:
         input_fields=[{"name": "text", "type": "string", "required": True}],
     ))
     registry.register(ToolDefinition(
+        name="screenshot",
+        description="Capture the screen: full, active window, or a region",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "mode", "type": "string", "required": False},
+            {"name": "region", "type": "object", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="inspect_screen",
+        description="Understand the screen: window, app and structured UI elements",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "mode", "type": "string", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="locate_target",
+        description="Locate a natural-language UI target with confidence",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "target", "type": "string", "required": True},
+            {"name": "min_confidence", "type": "number", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="visual_click",
+        description="Locate a UI target, click it, re-observe and verify",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "target", "type": "string", "required": True},
+            {"name": "button", "type": "string", "required": False},
+            {"name": "min_confidence", "type": "number", "required": False},
+            {"name": "expected_window", "type": "string", "required": False},
+            {"name": "verify_text", "type": "string", "required": False},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="visual_type",
+        description="Focus a field if given, type text, re-observe and verify",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "text", "type": "string", "required": True},
+            {"name": "target", "type": "string", "required": False},
+            {"name": "min_confidence", "type": "number", "required": False},
+            {"name": "expected_window", "type": "string", "required": False},
+            {"name": "verify_text", "type": "string", "required": False},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="visual_drag",
+        description="Locate two UI targets and drag from the first to the second",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "target", "type": "string", "required": True},
+            {"name": "to_target", "type": "string", "required": True},
+            {"name": "min_confidence", "type": "number", "required": False},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="visual_scroll",
+        description="Scroll at the current position or over a located point",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "amount", "type": "number", "required": True},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="visual_verify",
+        description="Re-observe the screen and check an expected visual state",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "kind", "type": "string", "required": True},
+            {"name": "text", "type": "string", "required": False},
+            {"name": "title", "type": "string", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
         name="send_whatsapp",
         description="Send a message to a recipient on WhatsApp Desktop",
         supports_dry_run=True,

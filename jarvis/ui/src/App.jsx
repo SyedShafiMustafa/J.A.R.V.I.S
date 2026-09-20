@@ -17,6 +17,7 @@ export default function App() {
   const [activityEvents, setActivityEvents] = useState([]);
   const [pendingAction, setPendingAction] = useState(null);
   const [clarification, setClarification] = useState(null);
+  const [visual, setVisual] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -129,6 +130,17 @@ export default function App() {
       if (event === 'session.started' || event === 'session.ended') {
         // session lifecycle observed; UI remains responsive
       }
+      return;
+    }
+
+    // Milestone 3 — visual computer agent state: target, app/window,
+    // confidence, current tool and verification state. No screenshots
+    // or raw screen contents ever travel in these frames.
+    if (type === 'visual_update') {
+      const summary = data.target || data.tool || 'visual agent';
+      const detail = [data.stage, data.confidence != null ? `conf ${data.confidence}` : null, data.verified === true ? 'VERIFIED' : data.verified === false ? 'UNVERIFIED' : null].filter(Boolean).join(' // ');
+      setVisual({ summary, detail, stage: data.stage, verified: data.verified, time: Date.now() });
+      pushActivity(`VISUAL ${data.stage || 'UPDATE'}`, `${summary}${detail ? ` — ${detail}` : ''}`);
       return;
     }
 
@@ -323,6 +335,11 @@ export default function App() {
     TRANSCRIBING: { label: 'TRANSCRIBING', detail: 'Converting speech to text...' },
     THINKING: { label: 'THINKING', detail: 'Processing request...' },
     EXECUTING: { label: 'EXECUTING', detail: 'Executing task...' },
+    VISUAL_OBSERVE: { label: 'VISUAL OBSERVE', detail: 'Capturing screen state...' },
+    VISUAL_LOCATE: { label: 'LOCATING TARGET', detail: 'Finding UI target...' },
+    VISUAL_ACT: { label: 'ACTION', detail: 'Interacting with UI...' },
+    VISUAL_VERIFY: { label: 'VERIFYING', detail: 'Verifying visual result...' },
+    VISUAL_RECOVER: { label: 'RECOVERING', detail: 'Retrying with new strategy...' },
     SPEAKING: { label: 'SPEAKING', detail: 'Responding...' },
     STOPPING: { label: 'STOPPING', detail: 'Releasing voice resources...' },
     ERROR: { label: 'ERROR', detail: 'Attention required' },
@@ -407,6 +424,8 @@ export default function App() {
               </small>
             </div>
             <div className="intel-task">{lastToolEvent ? `${lastToolEvent.kind.toUpperCase()} // ${lastToolEvent.tool}` : 'NO ACTIVE TASK'}</div>
+            <div className="intel-row"><span>VISUAL AGENT</span><strong>{visual ? visual.summary.toUpperCase().slice(0, 28) : 'IDLE'}</strong></div>
+            {visual && <div className="intel-task">{`${visual.stage || 'UPDATE'}${visual.verified === true ? ' // VERIFIED' : visual.verified === false ? ' // UNVERIFIED' : ''}`}</div>}
             <div className="panel-label activity-title">ACTIVITY STREAM <span>04</span></div>
             <div className="activity-stream">
               {activity.map((event, i) => <div className="activity-item" key={`${event.time}-${i}`}><time>{formatTime(event.time)}</time><span>{event.label}</span><small>{event.detail}</small></div>)}

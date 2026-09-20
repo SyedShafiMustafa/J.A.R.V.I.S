@@ -99,6 +99,13 @@ PHASE_EXECUTING = "EXECUTING"
 PHASE_SPEAKING = "SPEAKING"
 PHASE_ERROR = "ERROR"
 PHASE_STOPPING = "STOPPING"
+# Milestone 3 — visual computer agent stages (additive; existing voice
+# phases and their order are untouched).
+PHASE_VISUAL_OBSERVE = "VISUAL_OBSERVE"
+PHASE_VISUAL_LOCATE = "VISUAL_LOCATE"
+PHASE_VISUAL_ACT = "VISUAL_ACT"
+PHASE_VISUAL_VERIFY = "VISUAL_VERIFY"
+PHASE_VISUAL_RECOVER = "VISUAL_RECOVER"
 
 VALID_STATUSES = {
     STATUS_IDLE,
@@ -120,6 +127,38 @@ VALID_PHASES = {
     PHASE_SPEAKING,
     PHASE_ERROR,
     PHASE_STOPPING,
+    PHASE_VISUAL_OBSERVE,
+    PHASE_VISUAL_LOCATE,
+    PHASE_VISUAL_ACT,
+    PHASE_VISUAL_VERIFY,
+    PHASE_VISUAL_RECOVER,
+}
+
+# Visual tool -> HUD phase shown while that tool runs. Read-only visual
+# tools surface OBSERVE/LOCATE; acting tools surface ACT; verification
+# surfaces VERIFY. RECOVER is reported inside the tool evidence trail.
+_VISUAL_TOOL_PHASES = {
+    "screenshot": PHASE_VISUAL_OBSERVE,
+    "inspect_screen": PHASE_VISUAL_OBSERVE,
+    "locate_target": PHASE_VISUAL_LOCATE,
+    "visual_click": PHASE_VISUAL_ACT,
+    "visual_type": PHASE_VISUAL_ACT,
+    "visual_drag": PHASE_VISUAL_ACT,
+    "visual_scroll": PHASE_VISUAL_ACT,
+    "visual_verify": PHASE_VISUAL_VERIFY,
+}
+
+# Visual tool -> HUD stage label (mirrors tools/visual.py STAGE_LABELS
+# without importing the automation stack into the server module).
+_VISUAL_STAGE_LABELS = {
+    "screenshot": "VISUAL OBSERVE",
+    "inspect_screen": "VISUAL OBSERVE",
+    "locate_target": "LOCATING TARGET",
+    "visual_click": "ACTION",
+    "visual_type": "ACTION",
+    "visual_drag": "ACTION",
+    "visual_scroll": "ACTION",
+    "visual_verify": "VERIFYING",
 }
 
 WAKE_RESPONSES = [
@@ -955,6 +994,37 @@ class JarvisBackendService:
         except Exception:
             _log.debug("experience save failed", exc_info=True)
 
+    def _emit_visual_update(self, call: Any, result: Any) -> None:
+        """Push a compact visual-agent state frame to the HUD.
+
+        Surfaces target name, application/window, confidence, current
+        tool and verification state without exposing raw screenshots,
+        OCR dumps or typed text (best effort truncation).
+        """
+        try:
+            data = getattr(result, "data", None) or {}
+            payload = call.payload if isinstance(call.payload, dict) else {}
+            target = data.get("target") or {}
+            update = {
+                "type": "visual_update",
+                "tool": call.tool,
+                "stage": _VISUAL_STAGE_LABELS.get(call.tool, "ACTION"),
+                "target": (
+                    target.get("label")
+                    or payload.get("target")
+                    or payload.get("text")
+                    or payload.get("title")
+                ),
+                "app": data.get("app") or data.get("window"),
+                "confidence": target.get("confidence"),
+                "verified": data.get("verified"),
+                "retries": data.get("retries", 0),
+                "success": bool(getattr(result, "success", False)),
+            }
+            self.emit(update)
+        except Exception:
+            _log.debug("visual update emit failed", exc_info=True)
+
     def _run_action(self, runtime: dict[str, Any], text: str, plan: dict[str, Any] | None = None) -> None:
         audio = runtime["audio"]
         session = runtime["session"]
@@ -1029,8 +1099,14 @@ class JarvisBackendService:
                     tool=step["tool"],
                     payload={k: v for k, v in step.items() if k != "tool"},
                 )
+                visual_phase = _VISUAL_TOOL_PHASES.get(call.tool)
+                if visual_phase is not None:
+                    self._set_phase(visual_phase)
                 result = tool_runner.run(call, task=task)
                 self._record_experience(memory, call.tool, call.payload, result)
+                if visual_phase is not None:
+                    self._emit_visual_update(call, result)
+                    self._set_phase(PHASE_EXECUTING)
 
                 if not result.success:
                     if (result.data or {}).get("needs_clarification"):

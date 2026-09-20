@@ -58,6 +58,16 @@ _TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "press": PermissionLevel.HARMLESS,
     "hotkey": PermissionLevel.NORMAL,
     "click_text": PermissionLevel.NORMAL,
+    # Visual computer agent (Milestone 3). Observation is read-only;
+    # acting on the GUI is a normal user-requested action.
+    "screenshot": PermissionLevel.HARMLESS,
+    "inspect_screen": PermissionLevel.HARMLESS,
+    "locate_target": PermissionLevel.HARMLESS,
+    "visual_verify": PermissionLevel.HARMLESS,
+    "visual_click": PermissionLevel.NORMAL,
+    "visual_type": PermissionLevel.NORMAL,
+    "visual_drag": PermissionLevel.NORMAL,
+    "visual_scroll": PermissionLevel.NORMAL,
     "send_whatsapp": PermissionLevel.NORMAL,
     "delete_file": PermissionLevel.DESTRUCTIVE,
     "execute_terminal": PermissionLevel.SENSITIVE,
