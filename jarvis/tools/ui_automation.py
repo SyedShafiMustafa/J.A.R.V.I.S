@@ -1,5 +1,11 @@
-from pywinauto.application import Application
-import win32gui
+"""UI Automation via the Windows accessibility tree.
+
+The heavy Windows-only dependencies (pywinauto, pywin32) are imported
+lazily inside the methods that need them, so importing this module never
+fails on machines without them — callers get a clean exception only when
+they actually invoke UIA inspection.
+"""
+
 import pyautogui
 
 
@@ -13,6 +19,8 @@ class UIAutomation:
     # -------------------------------
 
     def active_window(self):
+        from pywinauto.application import Application
+        import win32gui
         hwnd = win32gui.GetForegroundWindow()
         app = Application(backend="uia").connect(handle=hwnd)
         return app.window(handle=hwnd)
@@ -31,6 +39,7 @@ class UIAutomation:
     def foreground_title(self):
         """Foreground window title, or None if it cannot be read."""
         try:
+            import win32gui
             return win32gui.GetWindowText(win32gui.GetForegroundWindow()) or None
         except Exception:
             return None
