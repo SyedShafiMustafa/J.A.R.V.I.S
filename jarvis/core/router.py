@@ -14,6 +14,22 @@ class CommandRouter:
         # COMPLEX TASKS → LET THE PLANNER HANDLE THEM
         # ==================================================
 
+        # ==================================================
+        # TERMINAL / SCRIPT / SHELL → LET THE PLANNER HANDLE THEM
+        # ==================================================
+        # "run the command ...", "open a terminal and ...", "execute the
+        # python script" are computer-use requests, not "open an app".
+        # Deferring them keeps the fast app-open shortcut from swallowing a
+        # real shell command as an application name.
+        terminal_markers = [
+            "terminal", "command prompt", "command line", " the command ",
+            "shell", "cmd", "powershell", "bash", "script",
+            "python ", "pip ", "echo ", "git ", "git status", "git diff",
+            "git log", "git commit", "&&", "|",
+        ]
+        if any(marker in text for marker in terminal_markers):
+            return False, None
+
         complex_words = [
             "message",
             "text",

@@ -179,3 +179,102 @@ def test_scheduler_invokes_action_handler():
             assert seen[0][0] == "run_pytest"
         finally:
             sched.close()
+
+
+# ── Router / classification reachability ────────────────────────────────────
+
+def test_router_defers_terminal_and_script_requests():
+    """A shell/script request must reach the planner, not the open-app shortcut."""
+    from core.router import CommandRouter
+
+    router = CommandRouter()
+    for text in (
+        "run the command echo jarvis",
+        "open a terminal and run dir",
+        "execute the python script build.py",
+        "run git status in the repo",
+    ):
+        handled, _ = router.route(text)
+        assert handled is False, f"router wrongly handled: {text!r}"
+
+
+def test_router_still_handles_plain_open():
+    from core.router import CommandRouter
+
+    handled, reply = CommandRouter().route("open notepad")
+    assert handled is True
+    assert "notepad" in reply.lower()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "create a file named notes.txt in downloads",
+        "run the command echo hi",
+        "list the files in the project",
+        "delete the file temp.txt",
+        "run git status",
+        "execute the python script setup.py",
+    ],
+)
+def test_action_classifier_covers_computer_use(text):
+    from backend.live_adapters import _is_action_request
+
+    assert _is_action_request(text.lower()) is True
+
+
+def test_router_handled_open_records_experience():
+    from backend.live_adapters import LiveOrchestrator
+
+    class _Mem:
+        def __init__(self):
+            self.saved = []
+            self.messages = []
+
+        def save_experience(self, **kw):
+            self.saved.append(kw)
+
+        def retrieve_experiences(self, *a, **k):
+            return []
+
+        def search_memories(self, *a, **k):
+            return []
+
+        def save_message(self, *a, **k):
+            self.messages.append((a, k))
+
+    class _Router:
+        def route(self, text):
+            return True, "Opening Notepad."
+
+    orch = LiveOrchestrator.__new__(LiveOrchestrator)
+    orch.memory = _Mem()
+    orch.router = _Router()
+
+    decision = orch.decide("open notepad")
+    assert decision.kind == "reply"
+    assert orch.memory.saved, "router-handled open did not record experience"
+    assert orch.memory.saved[0]["scenario"] == "tool:open_app"
+    assert orch.memory.saved[0]["outcome"] == "success"
+
+
+def test_router_handled_failure_records_failure():
+    from backend.live_adapters import LiveOrchestrator
+
+    class _Mem:
+        saved = []
+
+        def save_experience(self, **kw):
+            self.saved.append(kw)
+
+    class _Router:
+        def route(self, text):
+            return True, "I couldn't find Foo."
+
+    orch = LiveOrchestrator.__new__(LiveOrchestrator)
+    orch.memory = _Mem()
+    _Mem.saved = []
+    orch.router = _Router()
+
+    orch.decide("open foo")
+    assert _Mem.saved[0]["outcome"] == "failure"

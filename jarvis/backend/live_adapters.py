@@ -570,6 +570,7 @@ class LiveOrchestrator:
 
         handled, reply = self.router.route(user_text)
         if handled:
+            self._record_router_experience(user_text, reply)
             return OrchestratorDecision(
                 kind="reply",
                 reply=reply,
@@ -598,6 +599,32 @@ class LiveOrchestrator:
             intent=user_text,
             metadata={"handled_by": "brain", "context": context},
         )
+
+    def _record_router_experience(self, user_text: str, reply: str) -> None:
+        """Record the outcome of a router-handled (fast-path) app command.
+
+        The command router resolves simple ``open``/``close`` requests without
+        going through the planner, so without this the experience table would
+        never learn which app names actually resolve on this machine.
+        """
+        text = user_text.lower()
+        if any(w in text for w in ("close", "quit")):
+            tool = "close_app"
+        elif any(text.startswith(k) for k in ("open", "launch", "start", "run", "bring up", "use")):
+            tool = "open_app"
+        else:
+            return
+        low = reply.lower()
+        outcome = "failure" if ("couldn't" in low or "cannot" in low or "unable" in low) else "success"
+        try:
+            self.memory.save_experience(
+                scenario=f"tool:{tool}",
+                strategy=user_text[:300],
+                outcome=outcome,
+                lesson=reply[:300],
+            )
+        except Exception:
+            pass
 
     def plan_action(self, user_text: str, lessons: list[str] | None = None) -> Task:
         """Plan an action request into a tracked Task."""
@@ -628,5 +655,30 @@ def _is_action_request(text: str) -> bool:
         "press",
         "youtube",
         "google",
+        # computer-use verbs (filesystem / terminal / git / python tools)
+        "create",
+        "make",
+        "new file",
+        "file",
+        "folder",
+        "directory",
+        "delete",
+        "remove",
+        "rename",
+        "move",
+        "copy",
+        "list",
+        "read",
+        "run",
+        "execute",
+        "terminal",
+        "command",
+        "shell",
+        "git",
+        "commit",
+        "checkpoint",
+        "python",
+        "script",
+        "test",
     ]
     return any(word in text for word in action_words)
