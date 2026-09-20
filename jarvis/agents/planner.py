@@ -91,6 +91,15 @@ Special semantic target:
 22. run_pytest
 {"tool":"run_pytest","test_path":"core/tests"}
 
+23. analyze_directory (summarize a folder without changing it)
+{"tool":"analyze_directory","directory":"downloads"}
+
+24. find_duplicates (content-hash duplicate detection, read-only)
+{"tool":"find_duplicates","directory":"downloads"}
+
+25. organize_directory (clean up a folder by type/date/year/extension/age)
+{"tool":"organize_directory","directory":"downloads","strategy":"by_type","dry_run":true}
+
 ========================
 RULES
 ========================
@@ -300,6 +309,12 @@ class TaskPlanner:
             "git_branch": ({}, {}),
             "run_python_script": ({"script_path": str}, {"args": list}),
             "run_pytest": ({}, {"test_path": str}),
+            "analyze_directory": ({}, {"directory": str, "recursive": bool}),
+            "find_duplicates": ({}, {"directory": str, "recursive": bool}),
+            "organize_directory": (
+                {"directory": str},
+                {"strategy": str, "dry_run": bool, "older_than_days": int, "recursive": bool},
+            ),
         }
         for step in steps:
             if not isinstance(step, dict) or not isinstance(step.get("tool"), str):
@@ -325,6 +340,8 @@ class TaskPlanner:
                     )
                 elif field_type == (int, float):
                     valid = isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+                elif field_type is bool:
+                    valid = isinstance(value, bool)
                 elif field_type is int:
                     valid = isinstance(value, int) and not isinstance(value, bool) and value > 0
                 else:

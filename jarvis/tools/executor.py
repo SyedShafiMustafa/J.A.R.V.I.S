@@ -3,6 +3,7 @@ from tools.computer import ComputerController
 from tools.vision import ScreenVision
 from tools.whatsapp import WhatsAppManager
 from tools.filesystem import FilesystemTools
+from tools.organizer import FileOrganizer
 from tools.terminal import TerminalTool
 from tools.git_tool import GitTool
 from tools.python_dev import PythonDevTools
@@ -19,6 +20,7 @@ class TaskExecutor:
         self.vision = ScreenVision()
         self.whatsapp = WhatsAppManager(desktop=self.desktop, computer=self.computer, vision=self.vision)
         self.fs = FilesystemTools()
+        self.organizer = FileOrganizer()
         self.terminal = TerminalTool()
         self.git = GitTool()
         self.pydev = PythonDevTools()
@@ -115,6 +117,26 @@ class TaskExecutor:
 
             elif tool == "delete_file":
                 return self.fs.delete_file(step["path"])
+
+            # ---------------- File organization ----------------
+            elif tool == "analyze_directory":
+                return self.organizer.analyze_directory(
+                    step.get("directory", "."), bool(step.get("recursive", False))
+                )
+
+            elif tool == "find_duplicates":
+                return self.organizer.find_duplicates(
+                    step.get("directory", "."), bool(step.get("recursive", False))
+                )
+
+            elif tool == "organize_directory":
+                return self.organizer.organize_directory(
+                    step["directory"],
+                    strategy=step.get("strategy", "by_type"),
+                    dry_run=bool(step.get("dry_run", True)),
+                    older_than_days=step.get("older_than_days"),
+                    recursive=bool(step.get("recursive", False)),
+                )
 
             # ---------------- Terminal ----------------
             elif tool == "execute_terminal":

@@ -680,5 +680,16 @@ def _is_action_request(text: str) -> bool:
         "python",
         "script",
         "test",
+        # file-management agent (analyze / organize / duplicates)
+        "organize",
+        "organise",
+        "sort",
+        "tidy",
+        "declutter",
+        "arrange",
+        "archive",
+        "duplicate",
+        "clean up",
+        "cleanup",
     ]
     return any(word in text for word in action_words)

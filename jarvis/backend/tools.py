@@ -361,5 +361,41 @@ def build_default_tool_registry() -> ToolRegistry:
         input_fields=[{"name": "test_path", "type": "string", "required": False}],
         idempotent=False,
     ))
+    registry.register(ToolDefinition(
+        name="analyze_directory",
+        description="Summarize a folder: counts, sizes, age and duplicate totals",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "directory", "type": "string", "required": False},
+            {"name": "recursive", "type": "boolean", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="find_duplicates",
+        description="Find duplicate files by content hash",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "directory", "type": "string", "required": False},
+            {"name": "recursive", "type": "boolean", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="organize_directory",
+        description=(
+            "Preview or perform a folder cleanup by type, date, year, "
+            "extension or age. ``dry_run`` previews without moving files."
+        ),
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "directory", "type": "string", "required": True},
+            {"name": "strategy", "type": "string", "required": False},
+            {"name": "dry_run", "type": "boolean", "required": False},
+            {"name": "older_than_days", "type": "number", "required": False},
+            {"name": "recursive", "type": "boolean", "required": False},
+        ],
+        idempotent=False,
+    ))
 
     return registry

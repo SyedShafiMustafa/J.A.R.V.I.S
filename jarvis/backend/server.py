@@ -268,6 +268,8 @@ class JarvisBackendService:
         # A question JARVIS asked mid-action ("which WhatsApp chat did you
         # mean?"). The next utterance answers it and resumes the exact action.
         self._pending_clarification: dict[str, Any] | None = None
+        # A file-organization preview awaiting a yes/no before any file moves.
+        self._pending_organize: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -568,7 +570,15 @@ class JarvisBackendService:
         if self._pending_clarification is not None and self._answer_clarification(runtime, text):
             return
 
+        # A pending file-organization preview is answered by yes/no.
+        if self._pending_organize is not None and self._answer_organize(runtime, text):
+            return
+
         if self._handle_schedule_command(runtime, text):
+            return
+
+        # Deterministic file-management fast path (analyze / organize).
+        if self._handle_organize_command(runtime, text):
             return
 
         # Deterministic WhatsApp send: an explicit "send <name> <message> on
@@ -647,6 +657,145 @@ class JarvisBackendService:
         if audio is not None:
             self._speak(audio, reply)
         return True
+
+    # ------------------------------------------------------------------
+    # file management (analyze / organize)
+    # ------------------------------------------------------------------
+
+    def _handle_organize_command(self, runtime: dict[str, Any], text: str) -> bool:
+        """Handle deterministic file-management requests. Returns True if handled."""
+        try:
+            from tools.organizer import parse_organize_request, resolve_user_directory
+        except Exception:
+            return False
+
+        parsed = parse_organize_request(text)
+        if not parsed:
+            return False
+
+        tool_runner = runtime.get("tool_runner")
+        audio = runtime.get("audio")
+        if tool_runner is None:
+            return False
+
+        base = resolve_user_directory(parsed["directory"])
+        if base is None:
+            reply = f"I couldn't find a folder called '{parsed['directory']}'."
+            self.emit({"type": "error", "message": reply})
+            if audio is not None:
+                self._speak(audio, reply)
+            return True
+
+        payload: dict[str, Any] = {
+            "directory": str(base),
+            "strategy": parsed["strategy"],
+            "dry_run": True,
+        }
+        if parsed.get("older_than_days"):
+            payload["older_than_days"] = parsed["older_than_days"]
+
+        preview = tool_runner.run(ToolCall("organize_directory", payload))
+        data = preview.data or {}
+        moves = int(data.get("moves") or 0)
+        self.emit({
+            "type": "organize_preview",
+            "directory": str(base),
+            "strategy": parsed["strategy"],
+            "moves": moves,
+        })
+
+        if not preview.success or moves == 0:
+            if audio is not None:
+                self._speak(audio, preview.message)
+            return True
+
+        if parsed["explicit"]:
+            self._execute_organize(runtime, {**payload, "dry_run": False}, base, audio)
+            return True
+
+        # Batch mutation: preview, then ask before moving anything.
+        self._pending_organize = {
+            "payload": payload,
+            "directory": str(base),
+            "strategy": parsed["strategy"],
+            "moves": moves,
+            "asked_at": time.monotonic(),
+        }
+        strategy_words = parsed["strategy"].replace("_", " ")
+        question = (
+            f"I can move {moves} files in {base.name} into {strategy_words} folders. "
+            "Should I go ahead?"
+        )
+        self.emit({"type": "confirmation_required", "question": question, "tool": "organize_directory"})
+        if audio is not None:
+            self._speak(audio, question)
+        return True
+
+    def _answer_organize(self, runtime: dict[str, Any], text: str) -> bool:
+        """Resolve a pending organize preview with a yes/no utterance."""
+        pending = self._pending_organize
+        if not pending:
+            return False
+
+        age = time.monotonic() - float(pending.get("asked_at") or 0.0)
+        if age > self._CLARIFICATION_TTL_SECONDS:
+            self._pending_organize = None
+            return False
+
+        low = text.lower().strip(" .!?")
+        if "reminder" in low or "schedule" in low:
+            # A scheduling intent is not an answer to this question.
+            return False
+
+        negatives = ("no", "nope", "cancel", "stop", "don't", "dont", "never mind", "nevermind", "leave it")
+        affirmatives = ("yes", "yeah", "yep", "sure", "go ahead", "do it", "confirm", "okay", "ok", "proceed", "please do")
+        is_no = any(low == w or low.startswith(w + " ") or low.endswith(" " + w) for w in negatives)
+        is_yes = any(low == w or low.startswith(w + " ") for w in affirmatives)
+
+        audio = runtime.get("audio")
+        if is_no:
+            self._pending_organize = None
+            self.emit({"type": "organize_cancelled"})
+            if audio is not None:
+                self._speak(audio, "Okay, I left your files alone.")
+            return True
+
+        if is_yes:
+            self._pending_organize = None
+            self._execute_organize(
+                runtime,
+                {**pending["payload"], "dry_run": False},
+                Path(pending["directory"]),
+                audio,
+            )
+            return True
+
+        # Any other utterance drops the question so the user is never stuck.
+        self._pending_organize = None
+        return False
+
+    def _execute_organize(
+        self,
+        runtime: dict[str, Any],
+        payload: dict[str, Any],
+        base: Path,
+        audio: Any,
+    ) -> None:
+        tool_runner = runtime.get("tool_runner")
+        result = tool_runner.run(ToolCall("organize_directory", payload))
+        data = result.data or {}
+        self.emit({
+            "type": "organize_done",
+            "directory": str(base),
+            "moves": int(data.get("moves") or 0),
+            "verified": bool(data.get("verified")),
+            "success": bool(result.success),
+        })
+        memory = runtime.get("memory")
+        if memory is not None:
+            self._record_experience(memory, "organize_directory", payload, result)
+        if audio is not None:
+            self._speak(audio, result.message)
 
     def get_scheduled_tasks(self) -> tuple[int, dict[str, Any]]:
         try:
@@ -1257,6 +1406,11 @@ class JarvisBackendService:
                     timeout = time.monotonic() + idle_window
                     continue
 
+                # Deterministic file-management fast path (analyze / organize).
+                if self._handle_organize_command(runtime, user):
+                    timeout = time.monotonic() + idle_window
+                    continue
+
                 # Deterministic WhatsApp send (verified, no extra confirmation
                 # for an explicit user request).
                 whatsapp_plan = self._whatsapp_plan(user)
@@ -1270,6 +1424,10 @@ class JarvisBackendService:
                 if self._pending_clarification is not None and self._answer_clarification(
                     runtime, user
                 ):
+                    timeout = time.monotonic() + idle_window
+                    continue
+
+                if self._pending_organize is not None and self._answer_organize(runtime, user):
                     timeout = time.monotonic() + idle_window
                     continue
 

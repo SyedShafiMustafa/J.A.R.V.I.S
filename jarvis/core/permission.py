@@ -62,6 +62,21 @@ _TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "delete_file": PermissionLevel.DESTRUCTIVE,
     "execute_terminal": PermissionLevel.SENSITIVE,
     "system_shutdown": PermissionLevel.DESTRUCTIVE,
+    # File-management agent. Read-only inspection is harmless; a batch move is
+    # classified per payload (a preview never touches files).
+    "analyze_directory": PermissionLevel.HARMLESS,
+    "find_duplicates": PermissionLevel.HARMLESS,
+    "organize_directory": PermissionLevel.NORMAL,
+}
+
+# Tools whose risk depends on the payload, not just the tool name.
+# ``organize_directory`` is a preview (read-only) until ``dry_run`` is False.
+_PAYLOAD_AWARE_PERMISSIONS = {
+    "organize_directory": lambda payload: (
+        PermissionLevel.HARMLESS
+        if payload.get("dry_run", True)
+        else PermissionLevel.NORMAL
+    ),
 }
 
 
@@ -105,7 +120,11 @@ class PermissionEngine:
         Explicit user requests (e.g. "Send Ahmed a message on WhatsApp")
         do not require confirmation unless they are genuinely destructive or sensitive.
         """
-        level = _TOOL_PERMISSIONS.get(tool, PermissionLevel.NORMAL)
+        override = _PAYLOAD_AWARE_PERMISSIONS.get(tool)
+        if override is not None:
+            level = override(payload or {})
+        else:
+            level = _TOOL_PERMISSIONS.get(tool, PermissionLevel.NORMAL)
 
         if level == PermissionLevel.DESTRUCTIVE:
             return level, True

@@ -30,6 +30,16 @@ class CommandRouter:
         if any(marker in text for marker in terminal_markers):
             return False, None
 
+        # File-management / duplicate requests are computer-use tasks, not
+        # "open an app". Defer them so "organize my downloads" is never
+        # swallowed by the app-open shortcut as an app called "my downloads".
+        file_markers = [
+            "organize", "organise", "sort", "tidy", "clean up", "cleanup",
+            "declutter", "arrange", "archive", "duplicate",
+        ]
+        if any(marker in text for marker in file_markers):
+            return False, None
+
         complex_words = [
             "message",
             "text",
