@@ -328,6 +328,61 @@ def build_default_tool_registry() -> ToolRegistry:
         idempotent=True,
     ))
     registry.register(ToolDefinition(
+        name="list_windows",
+        description="List visible windows with titles, apps and geometry",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "pattern", "type": "string", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="switch_app",
+        description="Focus an application window by name or title, verified",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "target", "type": "string", "required": True},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="window_manage",
+        description="Minimize, maximize, restore, move, snap, check or close a window",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "target", "type": "string", "required": True},
+            {"name": "action", "type": "string", "required": True},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="extract_window_text",
+        description="Extract visible text from a window via OCR or clipboard",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "target", "type": "string", "required": False},
+            {"name": "method", "type": "string", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="read_clipboard",
+        description="Read the current clipboard text",
+        supports_dry_run=True,
+        input_fields=[],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="run_workflow",
+        description="Run a verified cross-application tool workflow",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "goal", "type": "string", "required": True},
+            {"name": "steps", "type": "array", "required": True},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
         name="send_whatsapp",
         description="Send a message to a recipient on WhatsApp Desktop",
         supports_dry_run=True,

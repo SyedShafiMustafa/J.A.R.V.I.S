@@ -68,6 +68,14 @@ _TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "visual_type": PermissionLevel.NORMAL,
     "visual_drag": PermissionLevel.NORMAL,
     "visual_scroll": PermissionLevel.NORMAL,
+    # Cross-application automation (Milestone 4). Window observation and
+    # text extraction are read-only; acting across apps is normal.
+    "list_windows": PermissionLevel.HARMLESS,
+    "extract_window_text": PermissionLevel.HARMLESS,
+    "read_clipboard": PermissionLevel.HARMLESS,
+    "switch_app": PermissionLevel.NORMAL,
+    "window_manage": PermissionLevel.NORMAL,
+    "run_workflow": PermissionLevel.NORMAL,
     "send_whatsapp": PermissionLevel.NORMAL,
     "delete_file": PermissionLevel.DESTRUCTIVE,
     "execute_terminal": PermissionLevel.SENSITIVE,
@@ -81,10 +89,16 @@ _TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
 
 # Tools whose risk depends on the payload, not just the tool name.
 # ``organize_directory`` is a preview (read-only) until ``dry_run`` is False.
+# ``extract_window_text`` is pure OCR until ``method`` touches the clipboard.
 _PAYLOAD_AWARE_PERMISSIONS = {
     "organize_directory": lambda payload: (
         PermissionLevel.HARMLESS
         if payload.get("dry_run", True)
+        else PermissionLevel.NORMAL
+    ),
+    "extract_window_text": lambda payload: (
+        PermissionLevel.HARMLESS
+        if payload.get("method", "ocr") == "ocr"
         else PermissionLevel.NORMAL
     ),
 }

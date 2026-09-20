@@ -777,5 +777,8 @@ def test_server_accepts_visual_phases():
         assert phase in server.VALID_PHASES
     mapping = {"screenshot", "inspect_screen", "locate_target",
                "visual_click", "visual_type", "visual_drag",
-               "visual_scroll", "visual_verify"}
+               "visual_scroll", "visual_verify",
+               # Milestone 4 window/workflow tools share the HUD map.
+               "list_windows", "switch_app", "window_manage",
+               "extract_window_text", "read_clipboard", "run_workflow"}
     assert set(server._VISUAL_TOOL_PHASES) == mapping

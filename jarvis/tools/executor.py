@@ -2,6 +2,8 @@ from tools.desktop_control import DesktopController
 from tools.computer import ComputerController
 from tools.vision import ScreenVision
 from tools.visual import VisualAgent
+from tools.windows import WindowManager
+from tools.workflows import WorkflowEngine
 from tools.whatsapp import WhatsAppManager
 from tools.filesystem import FilesystemTools
 from tools.organizer import FileOrganizer
@@ -20,6 +22,12 @@ class TaskExecutor:
         self.computer = ComputerController()
         self.vision = ScreenVision()
         self.visual = VisualAgent(computer=self.computer, vision=self.vision)
+        self.windows = WindowManager(computer=self.computer,
+                                     desktop=self.desktop)
+        self.workflows = WorkflowEngine(
+            step_runner=lambda step: self._execute_step(step["tool"], step),
+            visual=self.visual, windows=self.windows,
+            computer=self.computer)
         self.whatsapp = WhatsAppManager(desktop=self.desktop, computer=self.computer, vision=self.vision)
         self.fs = FilesystemTools()
         self.organizer = FileOrganizer()
@@ -325,6 +333,137 @@ class TaskExecutor:
                     "verify_ms": res["verify_ms"],
                 })
 
+            # ---------------- Windows + workflows (Milestone 4) ----------------
+            # Cross-application automation through the shared
+            # WindowManager / WorkflowEngine. Results carry serializable
+            # evidence; window handles never leave this layer as live
+            # objects (hwnd ints only).
+
+            elif tool == "list_windows":
+                res = self.windows.list_windows(
+                    pattern=step.get("pattern"), limit=30)
+                if not res.get("ok"):
+                    return ToolResult(
+                        tool, False, res.get("error") or "list failed",
+                        {"started": True, "completed": False,
+                         "reason": res.get("reason", "enumerate_failed")},
+                    )
+                return ToolResult(tool, True,
+                    f"{res['count']} windows listed", {
+                    "started": True, "completed": True,
+                    "windows": res["windows"], "count": res["count"],
+                    "list_ms": res["list_ms"],
+                })
+
+            elif tool == "switch_app":
+                res = self.windows.focus(step["target"])
+                if not res.get("ok"):
+                    return ToolResult(
+                        tool, False,
+                        res.get("reason") or "switch failed", {
+                        "started": True, "completed": False,
+                        "reason": res.get("reason", "focus_failed"),
+                        "verified": False,
+                        "candidates": res.get("candidates", [])},
+                    )
+                window = res["window"]
+                return ToolResult(tool, True,
+                    f"switched to {window.get('title')}", {
+                    "started": True, "completed": True, "verified": True,
+                    # Focus is verified by hwnd (titles can repeat).
+                    "target": {"label": window.get("title"),
+                               "confidence": 0.95},
+                    "app": window.get("app"),
+                    "focus_ms": res.get("focus_ms")},
+                )
+
+            elif tool == "window_manage":
+                action = step.get("action")
+                if action in ("minimize", "maximize", "restore"):
+                    res = self.windows.set_state(step["target"], action)
+                elif action == "move_resize":
+                    res = self.windows.move_resize(
+                        step["target"], step.get("x"), step.get("y"),
+                        step.get("width"), step.get("height"))
+                elif action in ("snap_left", "snap_right"):
+                    res = self.windows.snap(
+                        step["target"],
+                        "left" if action == "snap_left" else "right")
+                elif action == "health":
+                    res = self.windows.health(step["target"])
+                    if res.get("ok"):
+                        return ToolResult(tool, True,
+                            "window responsive"
+                            if res.get("responsive")
+                            else "window unresponsive", {
+                            "started": True, "completed": True,
+                            "verified": True,
+                            "responsive": res.get("responsive"),
+                            "health_ms": res.get("health_ms")},
+                        )
+                elif action == "close":
+                    res = self.windows.close_window(step["target"])
+                elif action == "restart":
+                    res = self.windows.restart_app(
+                        step["target"], app=step.get("app"))
+                else:
+                    return ToolResult(
+                        tool, False, "invalid action",
+                        {"started": False, "completed": False})
+                if not res.get("ok"):
+                    return ToolResult(
+                        tool, False, res.get("reason") or "manage failed",
+                        {"started": True, "completed": False,
+                         "reason": res.get("reason", "action_failed"),
+                         "verified": False},
+                    )
+                return ToolResult(tool, True,
+                    f"window {action} verified", {
+                    "started": True, "completed": True, "verified": True,
+                    "action": action, "window": res.get("window")},
+                )
+
+            elif tool == "extract_window_text":
+                res = self._extract_text(step)
+                if not res.get("ok"):
+                    return ToolResult(
+                        tool, False, res.get("reason") or "extract failed",
+                        {"started": True, "completed": False,
+                         "reason": res.get("reason", "extract_failed"),
+                         "verified": False},
+                    )
+                return ToolResult(tool, True,
+                    f"extracted {res.get('chars', 0)} chars "
+                    f"via {res.get('method')}", {
+                    "started": True, "completed": True, "verified": True,
+                    "text": res.get("text", ""),
+                    "method": res.get("method"),
+                    "window": res.get("window")},
+                )
+
+            elif tool == "read_clipboard":
+                try:
+                    text = str(self.computer.get_clipboard() or "")
+                except Exception as exc:
+                    return ToolResult(
+                        tool, False, "clipboard unreadable",
+                        {"started": True, "completed": False,
+                         "reason": "clipboard_failed",
+                         "error": str(exc)[:200]},
+                    )
+                return ToolResult(tool, True,
+                    f"clipboard read ({len(text)} chars)", {
+                    "started": True, "completed": True, "verified": True,
+                    "text": text[:2000], "length": len(text),
+                    "truncated": len(text) > 2000},
+                )
+
+            elif tool == "run_workflow":
+                result = self.workflows.run_workflow(
+                    step.get("goal", ""), step.get("steps", []),
+                    max_retries=step.get("max_retries", 1))
+                return result
+
             # ---------------- Semantic Vision ----------------
 
             elif tool == "click_text":
@@ -338,6 +477,70 @@ class TaskExecutor:
 
             else:
                 return ToolResult(tool, False, f"Unknown tool: {tool}", {"started": False, "completed": False})
+
+    def _extract_text(self, step):
+        """Hybrid extraction: clipboard when asked, OCR otherwise.
+
+        ``method`` is ``ocr`` (read-only, default), ``clipboard``
+        (select-all + copy; exact text but disturbs selection) or
+        ``auto`` (clipboard first with OCR fallback). The clipboard is
+        preserved across clipboard-method reads.
+        """
+        method = step.get("method", "ocr")
+        target = step.get("target")
+        window = None
+        if target:
+            resolved = self.windows.resolve(target)
+            if resolved.get("ok") and resolved.get("found"):
+                window = resolved["window"].get("title")
+                focused = self.windows.focus(target)
+                if not focused.get("ok"):
+                    return {"ok": False,
+                            "reason": focused.get("reason", "focus_failed")}
+                window = focused["window"].get("title")
+            else:
+                return {"ok": False,
+                        "reason": resolved.get("reason", "target not found")}
+        else:
+            active = self.windows.active()
+            window = active.get("title") if active.get("available") else None
+
+        def _ocr():
+            model = self.visual.inspect()
+            if not model.get("ok"):
+                return {"ok": False, "reason": "observe_failed"}
+            return {"ok": True, "text": model.get("text", "")[:2000],
+                    "method": "ocr", "window": window}
+
+        if method == "ocr":
+            return _ocr()
+        if method in ("clipboard", "auto"):
+            saved = None
+            try:
+                saved = self.computer.get_clipboard()
+            except Exception:
+                saved = None
+            try:
+                self.computer.hotkey("ctrl", "a")
+                self.computer.hotkey("ctrl", "c")
+                text = str(self.computer.get_clipboard() or "")
+            except Exception as exc:
+                return {"ok": False, "reason": "clipboard_failed",
+                        "error": str(exc)[:200]}
+            finally:
+                try:
+                    if saved is not None:
+                        self.computer.set_clipboard(saved)
+                except Exception:
+                    pass
+            if text.strip():
+                return {"ok": True, "text": text[:2000],
+                        "method": "clipboard", "window": window,
+                        "chars": len(text)}
+            if method == "clipboard":
+                return {"ok": False, "reason": "clipboard_empty"}
+            return _ocr()
+        return {"ok": False, "reason": "invalid_method"}
 
     @staticmethod
     def _visual_outcome(tool, res, verb):
@@ -391,7 +594,60 @@ class TaskExecutor:
             "visual_drag": ("target", str),
             "visual_scroll": ("amount", int),
             "visual_verify": ("kind", str),
+            "list_windows": ("pattern", str),
+            "switch_app": ("target", str),
+            "window_manage": ("target", str),
+            "extract_window_text": ("target", str),
+            "read_clipboard": ("__none__", str),
+            "run_workflow": ("goal", str),
         }
+        if tool == "list_windows":
+            pattern = step.get("pattern")
+            if pattern is not None and (
+                    not isinstance(pattern, str) or not pattern.strip()):
+                return ToolResult(tool, False, "invalid pattern", {"started": False, "completed": False})
+            return None
+        if tool == "switch_app":
+            target = step.get("target")
+            if not isinstance(target, str) or not target.strip():
+                return ToolResult(tool, False, "invalid target", {"started": False, "completed": False})
+            return None
+        if tool == "window_manage":
+            target = step.get("target")
+            if not isinstance(target, str) or not target.strip():
+                return ToolResult(tool, False, "invalid target", {"started": False, "completed": False})
+            action = step.get("action")
+            if action not in ("minimize", "maximize", "restore",
+                              "move_resize", "snap_left", "snap_right",
+                              "health", "close", "restart"):
+                return ToolResult(tool, False, "invalid action", {"started": False, "completed": False})
+            if action == "move_resize":
+                for field in ("x", "y", "width", "height"):
+                    value = step.get(field)
+                    if isinstance(value, bool) or not isinstance(value, int):
+                        return ToolResult(tool, False, f"invalid {field}", {"started": False, "completed": False})
+            return None
+        if tool == "extract_window_text":
+            target = step.get("target")
+            if target is not None and (
+                    not isinstance(target, str) or not target.strip()):
+                return ToolResult(tool, False, "invalid target", {"started": False, "completed": False})
+            if step.get("method", "ocr") not in ("ocr", "clipboard", "auto"):
+                return ToolResult(tool, False, "invalid method", {"started": False, "completed": False})
+            return None
+        if tool == "read_clipboard":
+            return None
+        if tool == "run_workflow":
+            goal = step.get("goal")
+            if not isinstance(goal, str) or not goal.strip():
+                return ToolResult(tool, False, "invalid goal", {"started": False, "completed": False})
+            sub = step.get("steps")
+            if not isinstance(sub, list) or not sub or len(sub) > 50:
+                return ToolResult(tool, False, "invalid steps", {"started": False, "completed": False})
+            for s in sub:
+                if not isinstance(s, dict) or not isinstance(s.get("tool"), str):
+                    return ToolResult(tool, False, "invalid nested step", {"started": False, "completed": False})
+            return None
         if tool in ("screenshot", "inspect_screen"):
             mode = step.get("mode", "active")
             if mode not in ("active", "full", "region"):

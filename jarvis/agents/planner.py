@@ -124,6 +124,24 @@ Special semantic target:
 33. visual_verify (re-observe and check an expected visual state)
 {"tool":"visual_verify","kind":"text_visible","text":"Hello"}
 
+34. list_windows (enumerate windows with titles, apps and geometry)
+{"tool":"list_windows","pattern":"Chrome"}
+
+35. switch_app (focus an application window, verified by handle)
+{"tool":"switch_app","target":"Chrome"}
+
+36. window_manage (minimize/maximize/restore/move/snap/check/close)
+{"tool":"window_manage","target":"Notepad","action":"maximize"}
+
+37. extract_window_text (OCR read-only, or clipboard for exact text)
+{"tool":"extract_window_text","target":"Notepad","method":"ocr"}
+
+38. read_clipboard (read clipboard text for handoff verification)
+{"tool":"read_clipboard"}
+
+39. run_workflow (verified cross-app tool sequence with data handoff)
+{"tool":"run_workflow","goal":"Copy notes to clipboard","steps":[{"tool":"switch_app","target":"Notepad"},{"tool":"extract_window_text","method":"clipboard","save_as":"notes"}]}
+
 ========================
 RULES
 ========================
@@ -135,6 +153,12 @@ RULES
   send_whatsapp) when one exists; use the visual_* tools when no direct
   tool fits or the outcome must be visually verified.
 - Never invent screen coordinates: visual tools locate targets by language.
+- For window control use list_windows/switch_app/window_manage: never
+  invent application names, and never act when a target is ambiguous.
+- Hybrid priority: native window/API control first, app-specific tools
+  second, OCR/UIA third, visual clicking last.
+- For multi-step cross-app tasks prefer one run_workflow with per-step
+  verification over loose tool sequences.
 - For ANY messaging application, use message_box instead of "Type a message".
 - Preserve contact names exactly.
 - Preserve message text exactly.
@@ -365,6 +389,19 @@ class TaskPlanner:
                 {"kind": str},
                 {"text": str, "title": str},
             ),
+            "list_windows": ({}, {"pattern": str}),
+            "switch_app": ({"target": str}, {}),
+            "window_manage": (
+                {"target": str, "action": str},
+                {"x": int, "y": int, "width": int, "height": int,
+                 "app": str},
+            ),
+            "extract_window_text": ({}, {"target": str, "method": str}),
+            "read_clipboard": ({}, {}),
+            "run_workflow": (
+                {"goal": str, "steps": list},
+                {"max_retries": int},
+            ),
         }
         for step in steps:
             if not isinstance(step, dict) or not isinstance(step.get("tool"), str):
@@ -387,6 +424,33 @@ class TaskPlanner:
                     # negative scrolls down; zero is a harmless no-op.
                     valid = (
                         isinstance(value, int) and not isinstance(value, bool)
+                    )
+                elif tool == "window_manage" and field in ("x", "y"):
+                    # Screen origin (0, 0) is a valid position.
+                    valid = (
+                        isinstance(value, int)
+                        and not isinstance(value, bool) and value >= 0
+                    )
+                elif tool == "window_manage" and field in ("width", "height"):
+                    valid = (
+                        isinstance(value, int)
+                        and not isinstance(value, bool) and value > 0
+                    )
+                elif tool == "run_workflow" and field == "max_retries":
+                    # Zero retries (single attempt) is valid.
+                    valid = (
+                        isinstance(value, int)
+                        and not isinstance(value, bool) and value >= 0
+                    )
+                elif tool == "run_workflow" and field == "steps":
+                    # Nested plan steps: non-empty dicts naming a tool.
+                    # (Nested payloads are validated at execution time.)
+                    valid = (
+                        isinstance(value, list) and bool(value)
+                        and len(value) <= 50
+                        and all(isinstance(s, dict)
+                                and isinstance(s.get("tool"), str)
+                                for s in value)
                     )
                 elif field_type is dict:
                     valid = isinstance(value, dict) and bool(value)

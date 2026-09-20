@@ -106,6 +106,11 @@ PHASE_VISUAL_LOCATE = "VISUAL_LOCATE"
 PHASE_VISUAL_ACT = "VISUAL_ACT"
 PHASE_VISUAL_VERIFY = "VISUAL_VERIFY"
 PHASE_VISUAL_RECOVER = "VISUAL_RECOVER"
+# Milestone 4 — active-window and cross-app automation (additive).
+PHASE_WINDOW_SWITCH = "WINDOW_SWITCH"
+PHASE_APP_FOCUS = "APP_FOCUS"
+PHASE_EXTRACTING = "EXTRACTING"
+PHASE_TRANSFERRING = "TRANSFERRING"
 
 VALID_STATUSES = {
     STATUS_IDLE,
@@ -132,6 +137,10 @@ VALID_PHASES = {
     PHASE_VISUAL_ACT,
     PHASE_VISUAL_VERIFY,
     PHASE_VISUAL_RECOVER,
+    PHASE_WINDOW_SWITCH,
+    PHASE_APP_FOCUS,
+    PHASE_EXTRACTING,
+    PHASE_TRANSFERRING,
 }
 
 # Visual tool -> HUD phase shown while that tool runs. Read-only visual
@@ -146,6 +155,12 @@ _VISUAL_TOOL_PHASES = {
     "visual_drag": PHASE_VISUAL_ACT,
     "visual_scroll": PHASE_VISUAL_ACT,
     "visual_verify": PHASE_VISUAL_VERIFY,
+    "list_windows": PHASE_VISUAL_OBSERVE,
+    "switch_app": PHASE_WINDOW_SWITCH,
+    "window_manage": PHASE_APP_FOCUS,
+    "extract_window_text": PHASE_EXTRACTING,
+    "read_clipboard": PHASE_EXTRACTING,
+    "run_workflow": PHASE_TRANSFERRING,
 }
 
 # Visual tool -> HUD stage label (mirrors tools/visual.py STAGE_LABELS
@@ -159,6 +174,12 @@ _VISUAL_STAGE_LABELS = {
     "visual_drag": "ACTION",
     "visual_scroll": "ACTION",
     "visual_verify": "VERIFYING",
+    "list_windows": "VISUAL OBSERVE",
+    "switch_app": "WINDOW SWITCH",
+    "window_manage": "APP FOCUS",
+    "extract_window_text": "EXTRACTING",
+    "read_clipboard": "EXTRACTING",
+    "run_workflow": "TRANSFERRING",
 }
 
 WAKE_RESPONSES = [

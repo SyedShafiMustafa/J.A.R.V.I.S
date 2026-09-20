@@ -104,6 +104,30 @@ class ComputerController:
             time.sleep(0.3)
         except Exception:
             pass
+        if self._window_is_active(win):
+            return True
+        # Last resort: Windows denies foreground transfers to background
+        # processes (e.g. while the user works elsewhere). Attaching our
+        # thread to the foreground thread makes the transfer permissible
+        # — standard automation practice, then always detach.
+        try:
+            import ctypes
+            import win32gui
+            import win32process
+            fg = win32gui.GetForegroundWindow()
+            fg_tid = win32process.GetWindowThreadProcessId(fg)[0]
+            our_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+            win32process.AttachThreadInput(our_tid, fg_tid, True)
+            try:
+                win32gui.SetForegroundWindow(win._hWnd)
+                time.sleep(0.3)
+            finally:
+                try:
+                    win32process.AttachThreadInput(our_tid, fg_tid, False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return self._window_is_active(win)
 
     @staticmethod
