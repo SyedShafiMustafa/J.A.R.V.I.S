@@ -265,6 +265,10 @@ class JarvisBackendService:
         self._ws_clients_lock = threading.Lock()
         self._bus_bridge_attached = False
 
+        # A question JARVIS asked mid-action ("which WhatsApp chat did you
+        # mean?"). The next utterance answers it and resumes the exact action.
+        self._pending_clarification: dict[str, Any] | None = None
+
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
@@ -446,6 +450,7 @@ class JarvisBackendService:
         return 200, {"received": text}
 
     def handle_stop(self) -> tuple[int, dict[str, Any]]:
+        self._pending_clarification = None
         if self._runtime is not None:
             lifecycle = self._runtime.get("lifecycle")
             if lifecycle is not None:
@@ -558,6 +563,11 @@ class JarvisBackendService:
             self.handle_stop()
             return
 
+        # An outstanding "which one did you mean?" question is answered by the
+        # very next utterance and resumes the pending action verbatim.
+        if self._pending_clarification is not None and self._answer_clarification(runtime, text):
+            return
+
         if self._handle_schedule_command(runtime, text):
             return
 
@@ -647,6 +657,90 @@ class JarvisBackendService:
         if scheduler is None:
             return 200, {"scheduled_tasks": []}
         return 200, {"scheduled_tasks": scheduler.list_scheduled_tasks()}
+
+    # ------------------------------------------------------------------
+    # clarification ("which one did you mean?")
+    # ------------------------------------------------------------------
+
+    # A question that is never answered must not linger forever.
+    _CLARIFICATION_TTL_SECONDS = 180.0
+
+    def _ask_clarification(
+        self, runtime: dict[str, Any], result: Any, payload: dict[str, Any]
+    ) -> None:
+        """Ask the user a question, keeping the blocked action pending."""
+        candidates = [str(c) for c in ((result.data or {}).get("candidates") or [])]
+        self._pending_clarification = {
+            "candidates": candidates,
+            "message": payload.get("message") or "",
+            "recipient": payload.get("recipient") or "",
+            "asked_at": time.monotonic(),
+        }
+        question = result.message or "Which one did you mean?"
+        self.emit({
+            "type": "clarification_required",
+            "question": question,
+            "options": candidates,
+        })
+        audio = runtime.get("audio")
+        if audio is not None:
+            self._speak(audio, question)
+
+    def _answer_clarification(self, runtime: dict[str, Any], text: str) -> bool:
+        """Resolve a pending clarification.
+
+        Returns True only when the utterance actually answered the question, in
+        which case the original action is resumed (verified) or cancelled. Any
+        other utterance silently drops the question so the user is never stuck.
+        """
+        pending = self._pending_clarification
+        if not pending:
+            return False
+
+        age = time.monotonic() - float(pending.get("asked_at") or 0.0)
+        if age > self._CLARIFICATION_TTL_SECONDS:
+            self._pending_clarification = None
+            return False
+
+        try:
+            from tools.whatsapp import resolve_clarification_reply
+        except Exception:
+            self._pending_clarification = None
+            return False
+
+        resolved = resolve_clarification_reply(text, list(pending.get("candidates") or []))
+        if not resolved:
+            self._pending_clarification = None
+            return False
+
+        self._pending_clarification = None
+        audio = runtime.get("audio")
+        self.emit({
+            "type": "clarification_resolved",
+            "cancelled": bool(resolved.get("cancelled")),
+            "choice": resolved.get("choice"),
+        })
+
+        if resolved.get("cancelled"):
+            if audio is not None:
+                self._speak(audio, "Okay, cancelled.")
+            return True
+
+        choice = resolved["choice"]
+        self._run_action(
+            runtime,
+            text,
+            plan={
+                "goal": f"Send a WhatsApp message to {choice}",
+                "steps": [{
+                    "tool": "send_whatsapp",
+                    "recipient": choice,
+                    "message": pending.get("message") or "",
+                    "preferred": choice,
+                }],
+            },
+        )
+        return True
 
     @staticmethod
     def _whatsapp_plan(text: str) -> dict[str, Any] | None:
@@ -790,6 +884,14 @@ class JarvisBackendService:
                 self._record_experience(memory, call.tool, call.payload, result)
 
                 if not result.success:
+                    if (result.data or {}).get("needs_clarification"):
+                        question = result.message or "Which one did you mean?"
+                        self._ask_clarification(runtime, result, call.payload)
+                        task.fail("clarification required")
+                        if conversation_id:
+                            memory.save_message(conversation_id, "assistant", question)
+                        return
+
                     if (result.data or {}).get("confirmation_required"):
                         action_id = (result.data or {}).get("action_id")
                         prompt = (
@@ -808,12 +910,15 @@ class JarvisBackendService:
                         return
                     task.fail(result.message or "tool failed")
                     bus.publish(task_failed(task, session_id=session.id))
-                    failure = result.message or "tool execution failed"
+                    # Speak the tool's OWN message: it explains what happened
+                    # ("I couldn't find a chat called 'X' — say the saved
+                    # name") instead of a useless generic "couldn't complete".
+                    failure = result.message or "I couldn't complete that task."
                     self._set_error(failure)
                     self.emit({"type": "error", "message": failure})
-                    self._speak(audio, "I couldn't complete that task.")
+                    self._speak(audio, failure)
                     if conversation_id:
-                        memory.save_message(conversation_id, "assistant", "I couldn't complete that task.")
+                        memory.save_message(conversation_id, "assistant", failure)
                     return
 
                 # Tools carry their own verification language; use it verbatim.
@@ -1161,6 +1266,13 @@ class JarvisBackendService:
                     continue
 
                 # Emergency stop: immediate halt of the active turn.
+                # Answer to a pending "which chat did you mean?" question.
+                if self._pending_clarification is not None and self._answer_clarification(
+                    runtime, user
+                ):
+                    timeout = time.monotonic() + idle_window
+                    continue
+
                 if _is_emergency_stop_phrase(user):
                     interrupt = runtime.get("lifecycle")
                     if interrupt is not None:

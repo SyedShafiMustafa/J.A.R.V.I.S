@@ -16,6 +16,7 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [activityEvents, setActivityEvents] = useState([]);
   const [pendingAction, setPendingAction] = useState(null);
+  const [clarification, setClarification] = useState(null);
   const [currentTime, setCurrentTime] = useState(new Date());
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -143,8 +144,27 @@ export default function App() {
       return;
     }
 
+    // JARVIS found more than one plausible match (similar contact or group
+    // names) and needs the user to pick the intended one.
+    if (type === 'clarification_required') {
+      const options = Array.isArray(data.options) ? data.options.filter(Boolean) : [];
+      setClarification({ question: data.question || 'Which one did you mean?', options });
+      pushActivity('CLARIFICATION NEEDED', options.join(' / ') || data.question || '');
+      return;
+    }
+
+    if (type === 'clarification_resolved') {
+      setClarification(null);
+      pushActivity(
+        'CLARIFICATION RESOLVED',
+        data.cancelled ? 'CANCELLED' : data.choice || '',
+      );
+      return;
+    }
+
     if (type === 'emergency_stop') {
       setPendingAction(null);
+      setClarification(null);
       pushActivity('EMERGENCY STOP');
       return;
     }
@@ -221,18 +241,29 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [reply, transcript, toolEvents]);
 
-  const handleSend = async () => {
-    const text = input.trim();
-    if (!text) return;
-    setInput('');
+  const submitCommand = async (text) => {
+    if (!text || !text.trim()) return;
     setSending(true);
     try {
-      await api.sendCommand(text);
+      await api.sendCommand(text.trim());
     } catch (err) {
       setErrorMessage(err.message || 'Command failed');
     } finally {
       setSending(false);
     }
+  };
+
+  const handleSend = async () => {
+    const text = input.trim();
+    if (!text) return;
+    setInput('');
+    await submitCommand(text);
+  };
+
+  const handleClarify = async (choice) => {
+    setClarification(null);
+    pushActivity('CLARIFICATION', String(choice).toUpperCase());
+    await submitCommand(choice);
   };
 
   const handleKeyDown = (e) => {
@@ -406,6 +437,25 @@ export default function App() {
               <span>EMERGENCY STOP</span>
             </button>
             <div className="dock-hint">CENTRAL J // PRIMARY VOICE CONTROL — CLICK THE J TO TOGGLE LISTENING</div>
+            {clarification && (
+              <div className="clarify-banner">
+                <span>{clarification.question}</span>
+                <div className="clarify-options">
+                  {clarification.options.map((option) => (
+                    <button
+                      key={option}
+                      className="clarify-chip"
+                      onClick={() => handleClarify(option)}
+                    >
+                      {option}
+                    </button>
+                  ))}
+                  <button className="clarify-cancel" onClick={() => handleClarify('cancel')}>
+                    CANCEL
+                  </button>
+                </div>
+              </div>
+            )}
             {pendingAction && (
               <div className="confirm-banner">
                 <span>CONFIRM ACTION // {String(pendingAction.tool || '').toUpperCase()}</span>
@@ -538,6 +588,12 @@ const styles = `
   .confirm-banner span { flex: 1; }
   .confirm-approve, .confirm-reject { border: 1px solid var(--cyan); background: transparent; color: var(--cyan); cursor: pointer; padding: 5px 12px; letter-spacing: 1px; }
   .confirm-reject { border-color: var(--danger); color: var(--danger); }
+  /* "which one did you mean?" — pick the intended contact/group */
+  .clarify-banner { grid-column: 1 / -1; border: 1px solid var(--cyan); background: rgba(84,229,232,.05); color: var(--cyan); padding: 10px 12px; font-size: 11px; display: flex; flex-direction: column; gap: 8px; }
+  .clarify-options { display: flex; flex-wrap: wrap; gap: 8px; }
+  .clarify-chip { border: 1px solid var(--cyan); background: transparent; color: var(--cyan); cursor: pointer; padding: 4px 10px; letter-spacing: 1px; }
+  .clarify-chip:hover { background: rgba(84,229,232,.15); }
+  .clarify-cancel { border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; padding: 4px 10px; letter-spacing: 1px; }
   /* central J = primary voice control */
   button.core-visual { background: none; border: 0; padding: 0; cursor: pointer; }
   button.core-visual:focus-visible { outline: 2px solid var(--cyan); outline-offset: 8px; border-radius: 50%; }

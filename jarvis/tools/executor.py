@@ -89,7 +89,10 @@ class TaskExecutor:
                         "WhatsApp needs both a recipient and a message",
                         {"started": False, "completed": False, "verified": False},
                     )
-                return self.whatsapp.send_message(recipient, message)
+                # `preferred` is the exact chat the user picked when the name
+                # matched more than one conversation.
+                preferred = str(step.get("preferred") or "").strip() or None
+                return self.whatsapp.send_message(recipient, message, preferred=preferred)
 
             # ---------------- Filesystem ----------------
             elif tool == "list_files":

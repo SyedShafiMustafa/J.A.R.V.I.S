@@ -162,6 +162,85 @@ def test_emergency_stop_phrase_negative(text):
     assert _is_emergency_stop_phrase(text) is False
 
 
+# ── Failure reporting ───────────────────────────────────────────────────────
+
+def test_tool_failure_speaks_the_tools_own_explanation():
+    """A failed tool must say WHY (its own message), not a generic line.
+
+    "I couldn't complete that task" told the user nothing about a WhatsApp
+    name that could not be resolved.
+    """
+    from backend.server import JarvisBackendService
+    from backend.interfaces import ToolResult, ToolCall
+
+    service = JarvisBackendService()
+
+    class Audio:
+        def __init__(self):
+            self.spoken = []
+
+        def speak(self, text):
+            self.spoken.append(text)
+
+    class Session:
+        id = "s"
+        conversation_id = None
+
+        def note_user(self, text):
+            pass
+
+    class Lifecycle:
+        shutdown_requested = False
+
+    class Runner:
+        def run(self, call, task=None):
+            return ToolResult(
+                tool=call.tool,
+                success=False,
+                message="I couldn't find a WhatsApp chat matching 'fan bye ya'.",
+                data={"stage": "conversation_match", "started": True, "completed": False},
+            )
+
+    class Memory:
+        def save_message(self, *args):
+            pass
+
+        def maybe_summarize(self, *args):
+            pass
+
+        def retrieve_experiences(self, *args, **kwargs):
+            return []
+
+        def save_experience(self, **kwargs):
+            pass
+
+    class Bus:
+        def publish(self, event):
+            pass
+
+    audio = Audio()
+    runtime = {
+        "audio": audio,
+        "session": Session(),
+        "lifecycle": Lifecycle(),
+        "tool_runner": Runner(),
+        "orchestrator": None,
+        "bus": Bus(),
+        "memory": Memory(),
+    }
+
+    service._run_action(
+        runtime,
+        "send a message on whatsapp to fan bye ya saying hi",
+        plan={
+            "goal": "send",
+            "steps": [{"tool": "send_whatsapp", "recipient": "fan bye ya", "message": "hi"}],
+        },
+    )
+
+    assert audio.spoken == ["I couldn't find a WhatsApp chat matching 'fan bye ya'."]
+
+
 # ── Scheduler wiring ────────────────────────────────────────────────────────
 
 def test_scheduler_invokes_action_handler():
