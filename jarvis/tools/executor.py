@@ -4,6 +4,7 @@ from tools.vision import ScreenVision
 from tools.visual import VisualAgent
 from tools.windows import WindowManager
 from tools.workflows import WorkflowEngine
+from tools.settings import SettingsController
 from tools.whatsapp import WhatsAppManager
 from tools.filesystem import FilesystemTools
 from tools.organizer import FileOrganizer
@@ -29,6 +30,9 @@ class TaskExecutor:
             visual=self.visual, windows=self.windows,
             computer=self.computer)
         self.whatsapp = WhatsAppManager(desktop=self.desktop, computer=self.computer, vision=self.vision)
+        self.settings = SettingsController(computer=self.computer,
+                                           visual=self.visual,
+                                           desktop=self.desktop)
         self.fs = FilesystemTools()
         self.organizer = FileOrganizer()
         self.terminal = TerminalTool()
@@ -533,6 +537,29 @@ class TaskExecutor:
                     "retries": res.get("retries", 0)},
                 )
 
+            # ---------------- Windows settings (§29) ----------------
+            # Hybrid native-first control through the shared
+            # SettingsController (read → change → verify, UI fallback,
+            # honest failure). Results carry method + timings evidence.
+
+            elif tool == "get_setting":
+                res = self.settings.get_setting(step["setting"])
+                data = res.to_dict()
+                return ToolResult(
+                    tool, res.success, res.message or "setting read",
+                    {"started": True, "completed": res.success,
+                     "verified": res.verified, **data})
+
+            elif tool == "set_setting":
+                res = self.settings.set_setting(
+                    step["setting"], step.get("value"),
+                    fallback_allowed=step.get("fallback_allowed", True))
+                data = res.to_dict()
+                return ToolResult(
+                    tool, res.success, res.message or "setting change",
+                    {"started": True, "completed": res.success,
+                     "verified": res.verified, **data})
+
             # ---------------- Semantic Vision ----------------
 
             elif tool == "click_text":
@@ -822,6 +849,41 @@ class TaskExecutor:
             amount = step.get("amount")
             if isinstance(amount, bool) or not isinstance(amount, int):
                 return ToolResult(tool, False, "invalid amount", {"started": False, "completed": False})
+            return None
+        if tool == "get_setting":
+            setting = step.get("setting")
+            if setting not in ("dark_mode", "system_volume"):
+                return ToolResult(tool, False, "invalid setting", {"started": False, "completed": False})
+            return None
+        if tool == "set_setting":
+            setting = step.get("setting")
+            if setting not in ("dark_mode", "system_volume"):
+                return ToolResult(tool, False, "invalid setting", {"started": False, "completed": False})
+            value = step.get("value")
+            if setting == "dark_mode":
+                ok = isinstance(value, bool) or (
+                    isinstance(value, str) and value.strip().lower() in (
+                        "on", "off", "dark", "light", "enable", "disable",
+                        "enabled", "disabled", "true", "false", "1", "0"))
+                if not ok:
+                    return ToolResult(tool, False, "invalid value", {"started": False, "completed": False})
+            else:
+                if isinstance(value, bool):
+                    return ToolResult(tool, False, "invalid value", {"started": False, "completed": False})
+                if isinstance(value, (int, float)):
+                    if not 0 <= int(value) <= 100:
+                        return ToolResult(tool, False, "invalid value", {"started": False, "completed": False})
+                elif not (isinstance(value, str) and (
+                        value.strip().lower().rstrip("%") in (
+                            "mute", "muted", "unmute", "unmuted", "un-mute",
+                            "up", "down", "louder", "quieter", "increase",
+                            "decrease", "lower")
+                        or (value.strip().rstrip("%").isdigit()
+                            and 0 <= int(value.strip().rstrip("%")) <= 100))):
+                    return ToolResult(tool, False, "invalid value", {"started": False, "completed": False})
+            fallback = step.get("fallback_allowed", True)
+            if not isinstance(fallback, bool):
+                return ToolResult(tool, False, "invalid fallback_allowed", {"started": False, "completed": False})
             return None
         if tool == "hotkey":
             keys = step.get("keys")

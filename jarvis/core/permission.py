@@ -78,6 +78,11 @@ _TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "window_manage": PermissionLevel.NORMAL,
     "run_workflow": PermissionLevel.NORMAL,
     "send_whatsapp": PermissionLevel.NORMAL,
+    # Windows settings (§29). Reads are read-only; reversible changes
+    # are normal user-requested actions under the existing tiers —
+    # no new tier is introduced.
+    "get_setting": PermissionLevel.HARMLESS,
+    "set_setting": PermissionLevel.NORMAL,
     "delete_file": PermissionLevel.DESTRUCTIVE,
     "execute_terminal": PermissionLevel.SENSITIVE,
     "system_shutdown": PermissionLevel.DESTRUCTIVE,

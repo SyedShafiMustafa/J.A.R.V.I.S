@@ -142,8 +142,17 @@ Special semantic target:
 39. read_clipboard (read clipboard text for handoff verification)
 {"tool":"read_clipboard"}
 
-40. run_workflow (verified cross-app tool sequence with data handoff)
+ 40. run_workflow (verified cross-app tool sequence with data handoff)
 {"tool":"run_workflow","goal":"Copy notes to clipboard","steps":[{"tool":"switch_app","target":"Notepad"},{"tool":"extract_window_text","method":"clipboard","save_as":"notes"}]}
+
+ 41. get_setting (read a Windows setting without changing it)
+{"tool":"get_setting","setting":"dark_mode"}
+{"tool":"get_setting","setting":"system_volume"}
+
+ 42. set_setting (change a Windows setting, verified by re-reading)
+{"tool":"set_setting","setting":"dark_mode","value":"on"}
+{"tool":"set_setting","setting":"system_volume","value":50}
+{"tool":"set_setting","setting":"system_volume","value":"mute"}
 
 ========================
 RULES
@@ -193,6 +202,15 @@ RULES
 - For ANY messaging application, use message_box instead of "Type a message".
 - Preserve contact names exactly.
 - Preserve message text exactly.
+- Windows settings use ONLY get_setting/set_setting with
+  setting dark_mode (value "on"/"off") or system_volume (value
+  0-100, "mute", "unmute", "up" or "down"). Read with get_setting
+  ("Is dark mode on?", "What is my volume?"); change with
+  set_setting ("Turn on dark mode.", "Set volume to 50."). These
+  tools are ONLY for explicit OS-setting requests — never for chat
+  that merely mentions darkness, sound or music. "How do I turn on
+  dark mode?" is a how-to question and never reaches you as an
+  action.
 - To send a NEW WhatsApp message to a named contact, prefer the single
   send_whatsapp step over a click_text/type sequence.
 
@@ -291,6 +309,36 @@ Response:
   ]
 }
 """
+
+
+def _valid_setting_value(setting: object, value: object) -> bool:
+    """Validate a ``set_setting`` value for its setting (§29).
+
+    Mirrors the executor contract: dark_mode takes on/off words or a
+    bool; system_volume takes 0-100, mute/unmute/up/down words (an
+    optional trailing % is allowed). Anything else fails loudly so the
+    feedback retry corrects it instead of executing garbage.
+    """
+    if setting == "dark_mode":
+        if isinstance(value, bool):
+            return True
+        return isinstance(value, str) and value.strip().lower() in (
+            "on", "off", "dark", "light", "enable", "disable",
+            "enabled", "disabled", "true", "false", "1", "0")
+    if setting == "system_volume":
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, (int, float)):
+            return 0 <= int(value) <= 100
+        if not isinstance(value, str):
+            return False
+        low = value.strip().lower().rstrip("%")
+        if low in ("mute", "muted", "unmute", "unmuted", "un-mute",
+                   "up", "down", "louder", "quieter", "increase",
+                   "decrease", "lower"):
+            return True
+        return low.isdigit() and 0 <= int(low) <= 100
+    return False
 
 
 def _valid_nested_steps(value: object, schemas: dict) -> bool:
@@ -526,6 +574,11 @@ class TaskPlanner:
                 {"goal": str, "steps": list},
                 {"max_retries": int},
             ),
+            "get_setting": ({"setting": str}, {}),
+            "set_setting": (
+                {"setting": str, "value": object},
+                {"fallback_allowed": bool},
+            ),
         }
         for step in steps:
             if not isinstance(step, dict) or not isinstance(step.get("tool"), str):
@@ -580,6 +633,13 @@ class TaskPlanner:
                     # required fields, so a bad workflow fails here
                     # with a clear error instead of mid-execution.
                     valid = _valid_nested_steps(value, schemas)
+                elif tool == "get_setting" and field == "setting":
+                    valid = value in ("dark_mode", "system_volume")
+                elif tool == "set_setting" and field == "setting":
+                    valid = value in ("dark_mode", "system_volume")
+                elif tool == "set_setting" and field == "value":
+                    valid = _valid_setting_value(step.get("setting"),
+                                                 value)
                 elif field_type is dict:
                     valid = isinstance(value, dict) and bool(value)
                 elif field_type is list:

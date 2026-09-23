@@ -60,6 +60,11 @@ ACTION_VERBS = frozenset({
     # generic operating verbs
     "set", "change", "turn", "enable", "disable", "stop", "put",
     "bring",
+    # windows settings (§29): "Is dark mode on?", "What is my volume?",
+    # "Mute the volume.", "Unmute." must ACT (read or change) — the
+    # planner owns them via get_setting/set_setting. Explicit how-to
+    # questions still explain (checked before verbs above).
+    "volume", "mute", "unmute", "dark",
 })
 
 # Polite wrappers around an imperative core. Stripped before verb

@@ -51,7 +51,7 @@ ACTION_CASES = [
     "Please send this message.",
     # repeat still acts (planner resolves via lessons, never explains)
     "Do that again.",
-    # capabilities without tools act, then fail honestly (never explain)
+    # settings act through get_setting/set_setting (§29), never explain
     "Turn on dark mode.",
     "Install Git.",
 ]

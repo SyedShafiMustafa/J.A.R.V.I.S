@@ -550,4 +550,22 @@ def build_default_tool_registry() -> ToolRegistry:
         idempotent=False,
     ))
 
+    registry.register(ToolDefinition(
+        name="get_setting",
+        description="Read a Windows setting (dark_mode, system_volume) without changing it",
+        supports_dry_run=True,
+        input_fields=[{"name": "setting", "type": "string", "required": True}],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="set_setting",
+        description="Change a Windows setting (dark_mode on/off, system_volume 0-100/mute/unmute/up/down), verified",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "setting", "type": "string", "required": True},
+            {"name": "value", "type": "string", "required": True},
+        ],
+        idempotent=False,
+    ))
+
     return registry

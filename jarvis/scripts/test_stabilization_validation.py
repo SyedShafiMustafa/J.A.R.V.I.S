@@ -533,14 +533,29 @@ def main() -> int:
              "unknown recipient asks instead of sending",
              reply_of(state)[:120])
 
-        # --- SETTINGS: unsupported reversibly fails honestly ---
+        # --- SETTINGS (§29): dark mode reads, changes, verifies, restores ---
+        state = command("Is dark mode on?", settle=15.0)
+        low = reply_of(state).lower()
+        must("dark mode is" in low,
+             "dark mode reads current state",
+             reply_of(state)[:120])
+        state = command("Turn off dark mode.", settle=15.0)
+        must("dark mode is off" in reply_of(state).lower(),
+             "dark mode changes natively + verifies",
+             reply_of(state)[:120])
         state = command("Turn on dark mode.", settle=15.0)
+        must("dark mode is on" in reply_of(state).lower(),
+             "dark mode restores + verifies",
+             reply_of(state)[:120])
+
+        # --- SETTINGS: genuinely unsupported reversibly fails honestly ---
+        state = command("Turn on airplane mode.", settle=15.0)
         low = reply_of(state).lower()
         must(("couldn" in low or "sorry" in low or "can't" in low
-              or "unable" in low)
-             and state.get("phase") != "EXECUTING",
-             "unsupported setting fails honestly, no fake success",
-             reply_of(state)[:120])
+              or "unable" in low or "don't manage" in low)
+              and state.get("phase") != "EXECUTING",
+              "unsupported setting fails honestly, no fake success",
+              reply_of(state)[:120])
 
         # --- EMERGENCY: stop reaches stable IDLE ---
         # NOTE: /api/stop requires a JSON body (strict content-type).

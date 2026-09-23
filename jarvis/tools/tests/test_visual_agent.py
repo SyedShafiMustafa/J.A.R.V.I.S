@@ -796,5 +796,7 @@ def test_server_accepts_visual_phases():
                "visual_scroll", "visual_verify",
                # Milestone 4 window/workflow tools share the HUD map.
                "list_windows", "switch_app", "window_manage",
-               "extract_window_text", "read_clipboard", "run_workflow"}
+               "extract_window_text", "read_clipboard", "run_workflow",
+               # §29 settings tools share the HUD map.
+               "get_setting", "set_setting"}
     assert set(server._VISUAL_TOOL_PHASES) == mapping

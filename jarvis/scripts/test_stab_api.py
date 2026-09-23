@@ -142,14 +142,29 @@ def main() -> int:
              "unknown recipient asks instead of sending",
              V.reply_of(state)[:120])
 
-        # Unsupported setting fails honestly.
+        # §29 settings: dark mode reads, changes, verifies and restores.
+        state = V.command("Is dark mode on?", settle=15.0)
+        low = V.reply_of(state).lower()
+        must("dark mode is" in low,
+              "dark mode reads current state",
+              V.reply_of(state)[:120])
+        state = V.command("Turn off dark mode.", settle=15.0)
+        must("dark mode is off" in V.reply_of(state).lower(),
+              "dark mode changes natively + verifies",
+              V.reply_of(state)[:120])
         state = V.command("Turn on dark mode.", settle=15.0)
+        must("dark mode is on" in V.reply_of(state).lower(),
+              "dark mode restores + verifies",
+              V.reply_of(state)[:120])
+
+        # Genuinely unsupported setting still fails honestly.
+        state = V.command("Turn on airplane mode.", settle=15.0)
         low = V.reply_of(state).lower()
         must(("couldn" in low or "sorry" in low or "can't" in low
-              or "unable" in low)
-             and (state.get("phase") if state else "") != "EXECUTING",
-             "unsupported setting fails honestly",
-             V.reply_of(state)[:120])
+              or "unable" in low or "don't manage" in low)
+              and (state.get("phase") if state else "") != "EXECUTING",
+              "unsupported setting fails honestly",
+              V.reply_of(state)[:120])
 
         # Emergency stop reaches stable IDLE, then resume listening.
         V.api("POST", "/api/listen/start", timeout=15)

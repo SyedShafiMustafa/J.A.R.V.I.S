@@ -111,6 +111,14 @@ PHASE_WINDOW_SWITCH = "WINDOW_SWITCH"
 PHASE_APP_FOCUS = "APP_FOCUS"
 PHASE_EXTRACTING = "EXTRACTING"
 PHASE_TRANSFERRING = "TRANSFERRING"
+# §29 — hybrid Windows settings control (additive). Read/change surface
+# directly; VERIFYING/FALLBACK ride inside the tool evidence trail and
+# stage label. COMPLETE/FAILED come from the existing tool
+# finished/failed events — no new lifecycle is introduced.
+PHASE_SETTINGS_READ = "SETTINGS_READ"
+PHASE_SETTINGS_CHANGE = "SETTINGS_CHANGE"
+PHASE_SETTINGS_VERIFY = "VERIFYING"
+PHASE_SETTINGS_FALLBACK = "FALLBACK"
 
 VALID_STATUSES = {
     STATUS_IDLE,
@@ -141,6 +149,10 @@ VALID_PHASES = {
     PHASE_APP_FOCUS,
     PHASE_EXTRACTING,
     PHASE_TRANSFERRING,
+    PHASE_SETTINGS_READ,
+    PHASE_SETTINGS_CHANGE,
+    PHASE_SETTINGS_VERIFY,
+    PHASE_SETTINGS_FALLBACK,
 }
 
 # Visual tool -> HUD phase shown while that tool runs. Read-only visual
@@ -161,6 +173,8 @@ _VISUAL_TOOL_PHASES = {
     "extract_window_text": PHASE_EXTRACTING,
     "read_clipboard": PHASE_EXTRACTING,
     "run_workflow": PHASE_TRANSFERRING,
+    "get_setting": PHASE_SETTINGS_READ,
+    "set_setting": PHASE_SETTINGS_CHANGE,
 }
 
 # Visual tool -> HUD stage label (mirrors tools/visual.py STAGE_LABELS
@@ -180,6 +194,8 @@ _VISUAL_STAGE_LABELS = {
     "extract_window_text": "EXTRACTING",
     "read_clipboard": "EXTRACTING",
     "run_workflow": "TRANSFERRING",
+    "get_setting": "SETTINGS READ",
+    "set_setting": "SETTINGS CHANGE",
 }
 
 WAKE_RESPONSES = [
@@ -1051,11 +1067,18 @@ class JarvisBackendService:
         if not callable(save):
             return
         try:
+            lesson = (getattr(result, "message", "") or "")[:300]
+            # Surface the verified method (native/ui_automation/failed)
+            # so the planner learns which path works on this machine.
+            data = getattr(result, "data", None) or {}
+            method = data.get("method")
+            if method and method not in lesson:
+                lesson = f"{lesson} [method={method}]"[:300]
             save(
                 scenario=f"tool:{tool}",
                 strategy=json.dumps(payload, default=str)[:300],
                 outcome="success" if getattr(result, "success", False) else "failure",
-                lesson=(getattr(result, "message", "") or "")[:300],
+                lesson=lesson,
             )
         except Exception:
             _log.debug("experience save failed", exc_info=True)
