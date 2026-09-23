@@ -147,11 +147,66 @@ class ComputerController:
                 continue
         return True
 
+    def focus_hwnd(self, hwnd):
+        """Focus a window by handle (no title round-trip).
+
+        Titles repeat across windows and churn (Chrome renames per tab);
+        handles do not. Returns True only when the handle is verifiably
+        in the foreground afterwards.
+        """
+        try:
+            import win32gui
+        except Exception:
+            return False
+        for attempt in range(2):
+            try:
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+            time.sleep(0.2)
+            try:
+                active = gw.getActiveWindow()
+                if active is not None \
+                        and getattr(active, "_hWnd", None) == hwnd:
+                    return True
+            except Exception:
+                pass
+            if attempt == 0:
+                try:
+                    import ctypes
+                    import win32process
+                    fg = win32gui.GetForegroundWindow()
+                    fg_tid = win32process.GetWindowThreadProcessId(fg)[0]
+                    our_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+                    win32process.AttachThreadInput(our_tid, fg_tid, True)
+                    try:
+                        win32gui.SetForegroundWindow(hwnd)
+                        time.sleep(0.3)
+                    finally:
+                        try:
+                            win32process.AttachThreadInput(
+                                our_tid, fg_tid, False)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        return False
+
     def wait_for_window(self, title, timeout=10):
 
         start = time.time()
 
         while time.time() - start < timeout:
+
+            # Check first: re-focusing an already-front window steals
+            # and returns focus for no reason (focus thrash).
+            try:
+                active = gw.getActiveWindow()
+                if active is not None and active.title \
+                        and title.lower() in active.title.lower():
+                    return True
+            except Exception:
+                pass
 
             if self.focus_window(title):
                 return True

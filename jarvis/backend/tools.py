@@ -383,6 +383,17 @@ def build_default_tool_registry() -> ToolRegistry:
         idempotent=False,
     ))
     registry.register(ToolDefinition(
+        name="visual_menu",
+        description="Open or close a menu-bar menu with observed verification",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "target", "type": "string", "required": True},
+            {"name": "action", "type": "string", "required": False},
+            {"name": "min_confidence", "type": "number", "required": False},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
         name="send_whatsapp",
         description="Send a message to a recipient on WhatsApp Desktop",
         supports_dry_run=True,

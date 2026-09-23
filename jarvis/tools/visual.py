@@ -69,6 +69,13 @@ VERIFY_KINDS = ("text_visible", "text_absent", "window_active", "window_closed")
 #: Below this confidence the locator refuses instead of clicking.
 DEFAULT_MIN_CONFIDENCE = 0.6
 
+#: At or above this, a located target counts as high confidence.
+HIGH_CONFIDENCE = 0.85
+
+#: Two candidates this close (both above the floor) are ambiguous:
+#: picking the first would be a coin flip.
+AMBIGUITY_MARGIN = 0.05
+
 #: Initial attempt + this many retries (bounded — never infinite loops).
 DEFAULT_MAX_RETRIES = 2
 
@@ -483,6 +490,7 @@ class VisualAgent:
                 "found": False,
                 "target": target.strip(),
                 "reason": "low_confidence",
+                "confidence_level": "not_found",
                 "best": ranked[0] if ranked else None,
                 "candidates": ranked[:5],
                 "uncertain": True,
@@ -490,8 +498,32 @@ class VisualAgent:
                 "locate_ms": _ms(t0),
             }
 
-        self.last_error = None
         best = ranked[0]
+        # Ambiguous: two strong lookalikes within a hair of each other.
+        # Acting on the first would be a coin flip, so refuse with both.
+        runner_up = ranked[1] if len(ranked) > 1 else None
+        if runner_up is not None \
+                and runner_up["confidence"] >= min_conf \
+                and best["confidence"] - runner_up["confidence"] \
+                < AMBIGUITY_MARGIN:
+            self.last_error = "ambiguous target"
+            return {
+                "ok": True,
+                "found": False,
+                "target": target.strip(),
+                "reason": "ambiguous",
+                "confidence_level": "ambiguous",
+                "best": best,
+                "candidates": ranked[:5],
+                "uncertain": True,
+                "min_confidence": min_conf,
+                "locate_ms": _ms(t0),
+            }
+
+        self.last_error = None
+        best = dict(best)
+        best["confidence_level"] = (
+            "high" if best["confidence"] >= HIGH_CONFIDENCE else "low")
         return {
             "ok": True,
             "found": True,
@@ -838,7 +870,8 @@ class VisualAgent:
             return {**located, "ok": False,
                     "reason": located.get("reason", "target not found"),
                     "total_ms": _ms(t0)}
-        point = located["located"]["point"]
+        current = located["located"]
+        relocated = False
         before = self.capture().get("image")
 
         if expected_window:
@@ -850,7 +883,20 @@ class VisualAgent:
                              total_ms=_ms(t0))
 
         def _act() -> dict[str, Any]:
-            return self.click_point(point, button=button)
+            nonlocal current, relocated
+            # Re-locate on retries: menus re-render, lists scroll and
+            # tooltips shift pixels between attempts, so a stale point
+            # from attempt one can click empty space on attempt two.
+            if _act.attempt > 0:
+                fresh = self.locate(target,
+                                    min_confidence=min_confidence)
+                if fresh.get("found"):
+                    current = fresh["located"]
+                    relocated = True
+            _act.attempt += 1
+            return self.click_point(current["point"], button=button)
+
+        _act.attempt = 0
 
         if verify_text:
             def _verify() -> dict[str, Any]:
@@ -867,7 +913,8 @@ class VisualAgent:
 
         result = self.run_guarded(_act, _verify, max_retries=max_retries)
         return {"ok": result["ok"], "target": target,
-                "located": located["located"], "button": button,
+                "located": current, "button": button,
+                "relocated": relocated,
                 "verified": result["verified"],
                 "evidence": {"attempts": result["attempts"],
                              "trail": result["trail"]},
@@ -952,10 +999,24 @@ class VisualAgent:
                     "reason": dst.get("reason", "target not found"),
                     "total_ms": _ms(t0)}
         before = self.capture().get("image")
+        current_src, current_dst = src["located"], dst["located"]
 
         def _act() -> dict[str, Any]:
-            return self.drag_points(src["located"]["point"],
-                                    dst["located"]["point"])
+            nonlocal current_src, current_dst
+            if _act.attempt > 0:
+                for query, slot in ((target, "src"), (to_target, "dst")):
+                    fresh = self.locate(query,
+                                        min_confidence=min_confidence)
+                    if fresh.get("found"):
+                        if slot == "src":
+                            current_src = fresh["located"]
+                        else:
+                            current_dst = fresh["located"]
+            _act.attempt += 1
+            return self.drag_points(current_src["point"],
+                                    current_dst["point"])
+
+        _act.attempt = 0
 
         def _verify() -> dict[str, Any]:
             after = self.capture().get("image")
@@ -966,13 +1027,132 @@ class VisualAgent:
                     "evidence": {"screen_changed": bool(changed)}}
 
         result = self.run_guarded(_act, _verify, max_retries=max_retries)
-        return {"ok": result["ok"], "from": src["located"],
-                "to": dst["located"], "verified": result["verified"],
+        return {"ok": result["ok"], "from": current_src,
+                "to": current_dst, "verified": result["verified"],
                 "evidence": {"attempts": result["attempts"],
                              "trail": result["trail"]},
                 "retries": result["retries"], "total_ms": _ms(t0),
                 **({} if result["ok"]
                    else {"reason": result.get("reason")})}
+
+    # ------------------------------------------------------------------
+    # Menus — open / close with observed (not assumed) state
+    # ------------------------------------------------------------------
+
+    def _menu_signature(self) -> tuple[frozenset, int, Any]:
+        """Menu-bar state snapshot: (menu labels, element count, window).
+
+        Open menus surface as new ``menu``-type elements (UIA MenuItem)
+        or a burst of new OCR lines; a closed menu returns the snapshot
+        to baseline. Comparing snapshots is what makes open/close
+        claims verifiable instead of assumed from the click.
+        """
+        model = self.inspect()
+        labels = frozenset(
+            e["label"] for e in model.get("elements", [])
+            if e["type"] == "menu")
+        return labels, len(model.get("elements", [])), model.get("window")
+
+    def _menu_appeared(self, baseline: tuple, timeout: float = 6.0,
+                       ) -> dict[str, Any]:
+        base_labels, base_count, _ = baseline
+        deadline = time.monotonic() + max(0.5, timeout)
+        last: dict[str, Any] = {"appeared": False}
+        while time.monotonic() < deadline:
+            labels, count, window = self._menu_signature()
+            new_items = sorted(labels - base_labels)
+            if new_items or count - base_count >= 3:
+                return {"appeared": True, "new_items": new_items,
+                        "window": window}
+            last = {"appeared": False, "new_items": [],
+                    "window": window}
+            time.sleep(0.4)
+        return last
+
+    def _menu_absent(self, baseline: tuple, timeout: float = 5.0,
+                     ) -> dict[str, Any]:
+        base_labels, _, _ = baseline
+        deadline = time.monotonic() + max(0.5, timeout)
+        last: dict[str, Any] = {"absent": False}
+        while time.monotonic() < deadline:
+            labels, _, window = self._menu_signature()
+            if not (labels - base_labels):
+                return {"absent": True, "window": window}
+            last = {"absent": False,
+                    "remaining": sorted(labels - base_labels),
+                    "window": window}
+            time.sleep(0.4)
+        return last
+
+    def visual_menu(
+        self,
+        target: str,
+        action: str = "open",
+        min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+    ) -> dict[str, Any]:
+        """Open or close a menu-bar menu, verifying the observed state.
+
+        Open: locate the menu -> click -> re-observe until new menu
+        items appear. Close: Escape, then Alt, then toggle-click —
+        stopping at the first method whose re-observation shows the
+        menu gone. Never clicks arbitrary coordinates.
+        """
+        t0 = time.monotonic()
+        if action not in ("open", "close"):
+            return _fail("invalid_action", target=target, action=action)
+        located = self.locate(target, min_confidence=min_confidence)
+        if not located.get("ok") or not located.get("found"):
+            return {**located, "ok": False,
+                    "reason": located.get("reason", "target not found"),
+                    "total_ms": _ms(t0)}
+        point = located["located"]["point"]
+        baseline = self._menu_signature()
+
+        if action == "open":
+            clicked = self.click_point(point)
+            if not clicked.get("ok"):
+                return {**clicked, "target": target,
+                        "total_ms": _ms(t0)}
+            seen = self._menu_appeared(baseline)
+            ok = seen["appeared"]
+            return {
+                "ok": ok, "target": target, "located": located["located"],
+                "action": "open", "verified": ok,
+                "evidence": {"menu_check": seen},
+                "retries": 0, "total_ms": _ms(t0),
+                **({} if ok else {"reason": "menu_not_observed"}),
+            }
+
+        trail = []
+        strategies = [
+            ("escape", lambda: self.press_key("escape")),
+            ("alt", lambda: self.press_key("alt")),
+            ("toggle", lambda: self.click_point(point)),
+        ]
+        for name, fn in strategies[:max(1, max_retries + 1)]:
+            try:
+                acted = fn()
+            except Exception as exc:
+                acted = {"ok": False, "error": str(exc)[:200]}
+            gone = self._menu_absent(baseline)
+            trail.append({"strategy": name, "action": acted,
+                          "check": gone})
+            if acted.get("ok") and gone.get("absent"):
+                return {
+                    "ok": True, "target": target,
+                    "located": located["located"], "action": "close",
+                    "verified": True,
+                    "evidence": {"attempts": trail},
+                    "retries": len(trail) - 1, "total_ms": _ms(t0),
+                }
+        return {
+            "ok": False, "target": target,
+            "located": located["located"], "action": "close",
+            "verified": False, "reason": "menu_still_visible",
+            "evidence": {"attempts": trail},
+            "retries": len(trail), "total_ms": _ms(t0),
+        }
 
     # ------------------------------------------------------------------
     # Experience memory — structured lessons, never raw screenshots

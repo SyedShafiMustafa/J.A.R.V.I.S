@@ -70,7 +70,15 @@ class UIAutomation:
                     "Edit",
                     "Text",
                     "Document",
-                    "ListItem"
+                    "ListItem",
+                    # Menus must be first-class: File/Edit/View live
+                    # here, and OCR alone cannot tell a menu from text.
+                    "Menu",
+                    "MenuItem",
+                    "CheckBox",
+                    "ComboBox",
+                    "TabItem",
+                    "Hyperlink",
                 ]:
                     continue
 
@@ -92,8 +100,8 @@ class UIAutomation:
                     "bottom": rect.bottom
                 })
 
-            except:
-                pass
+            except Exception:
+                continue
 
         return controls
 

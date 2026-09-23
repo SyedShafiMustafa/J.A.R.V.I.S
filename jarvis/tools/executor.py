@@ -78,17 +78,40 @@ class TaskExecutor:
                 return validation
             # ---------------- Desktop ----------------
             if tool == "open_app":
-                ok = self.desktop.open_app(step["app"])
-                return self._outcome(tool, ok, "app not found or launch failed")
+                app = step["app"]
+                if not self.desktop.open_app(app):
+                    return self._outcome(
+                        tool, False,
+                        f"I couldn't find an app called '{app}'.")
+                if self.computer.wait_for_window(app, timeout=10):
+                    return ToolResult(
+                        tool, True, f"{app} is now open.",
+                        {"started": True, "completed": True,
+                         "verified": True})
+                return ToolResult(
+                    tool, True,
+                    f"{app} is open, but I couldn't bring its window "
+                    f"forward.",
+                    {"started": True, "completed": True,
+                     "verified": False})
 
             elif tool == "wait_window":
-                found = self.computer.wait_for_window(step["title"])
+                title = step["title"]
+                found = self.computer.wait_for_window(title)
                 if found:
-                    return self._outcome(tool, self.computer.focus_window(step["title"]), "window could not be focused")
-                return self._outcome(tool, False, "window not found before timeout")
+                    return self._outcome(tool, self.computer.focus_window(title), f"I couldn't focus '{title}'.")
+                return self._outcome(tool, False, f"'{title}' did not appear.")
 
             elif tool == "close_app":
-                return self._outcome(tool, self.desktop.close_app(step["app"]), "application not found or close failed")
+                app = step["app"]
+                if self.desktop.close_app(app):
+                    return ToolResult(
+                        tool, True, f"Closed {app}.",
+                        {"started": True, "completed": True,
+                         "verified": True})
+                return self._outcome(
+                    tool, False,
+                    f"I couldn't find an open app called '{app}'.")
 
             # ---------------- Messaging ----------------
             elif tool == "send_whatsapp":
@@ -254,13 +277,11 @@ class TaskExecutor:
                          "reason": found.get("reason", "locate_failed")},
                     )
                 if not found.get("found"):
-                    return ToolResult(
-                        tool, False,
-                        f"target not confidently found: {step['target']}",
-                        {"started": True, "completed": False,
-                         "reason": found.get("reason", "low_confidence"),
-                         "candidates": found.get("candidates", [])},
-                    )
+                    return self._target_failure_result(
+                        tool, step["target"], {
+                            **found,
+                            "reason": found.get("reason", "low_confidence")},
+                        f"target not confidently found: {step['target']}")
                 return ToolResult(tool, True,
                     f"target located: {found['located']['label']}", {
                     "started": True, "completed": True,
@@ -358,21 +379,18 @@ class TaskExecutor:
             elif tool == "switch_app":
                 res = self.windows.focus(step["target"])
                 if not res.get("ok"):
-                    return ToolResult(
-                        tool, False,
-                        res.get("reason") or "switch failed", {
-                        "started": True, "completed": False,
-                        "reason": res.get("reason", "focus_failed"),
-                        "verified": False,
-                        "candidates": res.get("candidates", [])},
-                    )
+                    return self._target_failure_result(
+                        tool, step["target"], res, "switch failed")
                 window = res["window"]
+                title = window.get("title") or step.get("target", "window")
+                selection = res.get("selection")
+                picked = (f" (using the {selection.replace('_', ' ')})"
+                          if selection else "")
                 return ToolResult(tool, True,
-                    f"switched to {window.get('title')}", {
+                    f"Switched to {title}{picked}.", {
                     "started": True, "completed": True, "verified": True,
                     # Focus is verified by hwnd (titles can repeat).
-                    "target": {"label": window.get("title"),
-                               "confidence": 0.95},
+                    "target": {"label": title, "confidence": 0.95},
                     "app": window.get("app"),
                     "focus_ms": res.get("focus_ms")},
                 )
@@ -385,10 +403,13 @@ class TaskExecutor:
                     res = self.windows.move_resize(
                         step["target"], step.get("x"), step.get("y"),
                         step.get("width"), step.get("height"))
-                elif action in ("snap_left", "snap_right"):
+                elif action in ("snap_left", "snap_right",
+                                    "snap_top", "snap_bottom"):
                     res = self.windows.snap(
                         step["target"],
-                        "left" if action == "snap_left" else "right")
+                        {"snap_left": "left", "snap_right": "right",
+                         "snap_top": "top",
+                         "snap_bottom": "bottom"}[action])
                 elif action == "health":
                     res = self.windows.health(step["target"])
                     if res.get("ok"):
@@ -411,14 +432,24 @@ class TaskExecutor:
                         tool, False, "invalid action",
                         {"started": False, "completed": False})
                 if not res.get("ok"):
-                    return ToolResult(
-                        tool, False, res.get("reason") or "manage failed",
-                        {"started": True, "completed": False,
-                         "reason": res.get("reason", "action_failed"),
-                         "verified": False},
-                    )
-                return ToolResult(tool, True,
-                    f"window {action} verified", {
+                    return self._target_failure_result(
+                        tool, step.get("target", "window"),
+                        res, "manage failed")
+                title = (res.get("window") or {}).get("title") \
+                    or step.get("target", "window")
+                spoken = {
+                    "minimize": f"{title} is now minimized.",
+                    "maximize": f"{title} is now maximized.",
+                    "restore": f"{title} is restored.",
+                    "move_resize": f"{title} is moved.",
+                    "snap_left": f"{title} is on the left.",
+                    "snap_right": f"{title} is on the right.",
+                    "snap_top": f"{title} is on the top half.",
+                    "snap_bottom": f"{title} is on the bottom half.",
+                    "close": f"Closed {title}.",
+                    "restart": f"{title} is restarted.",
+                }.get(action, f"window {action} verified")
+                return ToolResult(tool, True, spoken, {
                     "started": True, "completed": True, "verified": True,
                     "action": action, "window": res.get("window")},
                 )
@@ -464,6 +495,44 @@ class TaskExecutor:
                     max_retries=step.get("max_retries", 1))
                 return result
 
+            elif tool == "visual_menu":
+                action = step.get("action", "open")
+                if action not in ("open", "close"):
+                    return ToolResult(
+                        tool, False, "invalid action",
+                        {"started": False, "completed": False})
+                res = self.visual.visual_menu(
+                    step["target"],
+                    action=action,
+                    min_confidence=step.get("min_confidence", 0.6),
+                )
+                if not res.get("ok"):
+                    reason = res.get("reason") or "action_failed"
+                    if reason == "menu_not_observed":
+                        message = (f"I clicked '{step['target']}' but "
+                                   f"no menu appeared.")
+                    elif reason == "menu_still_visible":
+                        message = (f"The menu stayed open after trying "
+                                   f"several ways to close it.")
+                    else:
+                        message = self._human_target_failure(
+                            step["target"], res, f"menu {action} failed")
+                    return ToolResult(
+                        tool, False, message, {
+                        "started": True, "completed": False,
+                        "reason": reason,
+                        "verified": False,
+                        "evidence": res.get("evidence", {})},
+                    )
+                acted = "opened" if action == "open" else "closed"
+                return ToolResult(tool, True,
+                    f"menu {acted} and verified", {
+                    "started": True, "completed": True, "verified": True,
+                    "target": res.get("located"),
+                    "evidence": res.get("evidence", {}),
+                    "retries": res.get("retries", 0)},
+                )
+
             # ---------------- Semantic Vision ----------------
 
             elif tool == "click_text":
@@ -472,8 +541,22 @@ class TaskExecutor:
                 except Exception as exc:
                     reason = getattr(self.vision, "last_error", None) or "click failure"
                     raise RuntimeError(reason) from exc
+                if success:
+                    return ToolResult(
+                        tool, True, f"Clicked '{step['text']}'.",
+                        {"started": True, "completed": True,
+                         "verified": False})
                 reason = getattr(self.vision, "last_error", None) or "target not found"
-                return self._outcome(tool, success, reason)
+                if reason == "OCR failure":
+                    return ToolResult(
+                        tool, False, "I couldn't read the screen clearly.",
+                        {"started": True, "completed": False,
+                         "reason": reason, "verified": False})
+                return self._target_failure_result(
+                    tool, step["text"],
+                    {"reason": "not_found"
+                     if reason == "target not found" else reason},
+                    reason)
 
             else:
                 return ToolResult(tool, False, f"Unknown tool: {tool}", {"started": False, "completed": False})
@@ -543,11 +626,53 @@ class TaskExecutor:
         return {"ok": False, "reason": "invalid_method"}
 
     @staticmethod
-    def _visual_outcome(tool, res, verb):
+    def _human_target_failure(target, res, default):
+        """User-facing sentence for target-resolution failures.
+
+        Codes (ambiguous / low_confidence / not_found) stay in
+        ``data["reason"]`` for the planner; the spoken message names
+        what was seen and, for ambiguity, asks which one to use.
+        """
+        reason = res.get("reason") or "target not found"
+        candidates = res.get("candidates", []) or []
+        names = [c.get("label", c.get("title", "?")) for c in candidates]
+        if reason == "ambiguous" and names:
+            shown = ", ".join(f"'{n}'" for n in names[:3])
+            return (f"I found {len(names)} matches for '{target}' "
+                    f"({shown}). Which one should I use?")
+        if reason == "low_confidence":
+            return f"I couldn't confidently find '{target}'."
+        if reason in ("not_found", "target not found"):
+            return f"I couldn't find '{target}'."
+        if reason == "focus_failed":
+            return f"I couldn't bring '{target}' forward."
+        if reason in ("snap_not_reached", "move_not_reached",
+                      "state_not_reached"):
+            title = (res.get("window") or {}).get("title") or target
+            return (f"'{title}' didn't reach the requested state. "
+                    f"It may be busy or still animating.")
+        return res.get("message") or default
+
+    def _target_failure_result(self, tool, target, res, default):
+        return ToolResult(
+            tool, False,
+            self._human_target_failure(target, res, default),
+            {"started": True, "completed": False,
+             "reason": res.get("reason", "target not found"),
+             "verified": False,
+             "candidates": res.get("candidates", [])},
+        )
+
+    def _visual_outcome(self, tool, res, verb):
         """ToolResult from a VisualAgent guarded op (never bare claims)."""
         if not res.get("ok"):
+            target = res.get("target")
+            if isinstance(target, dict):
+                target = target.get("label", "")
+            message = self._human_target_failure(
+                target or "the target", res, f"visual {verb} failed")
             return ToolResult(
-                tool, False, res.get("reason") or f"visual {verb} failed",
+                tool, False, message,
                 {"started": True, "completed": False,
                  "reason": res.get("reason", "action_failed"),
                  "verified": False,
@@ -594,6 +719,7 @@ class TaskExecutor:
             "visual_drag": ("target", str),
             "visual_scroll": ("amount", int),
             "visual_verify": ("kind", str),
+            "visual_menu": ("target", str),
             "list_windows": ("pattern", str),
             "switch_app": ("target", str),
             "window_manage": ("target", str),
@@ -619,6 +745,7 @@ class TaskExecutor:
             action = step.get("action")
             if action not in ("minimize", "maximize", "restore",
                               "move_resize", "snap_left", "snap_right",
+                              "snap_top", "snap_bottom",
                               "health", "close", "restart"):
                 return ToolResult(tool, False, "invalid action", {"started": False, "completed": False})
             if action == "move_resize":
@@ -680,6 +807,16 @@ class TaskExecutor:
         if tool == "visual_verify":
             if step.get("kind") not in ("text_visible", "text_absent", "window_active", "window_closed"):
                 return ToolResult(tool, False, "invalid kind", {"started": False, "completed": False})
+            return None
+        if tool == "visual_menu":
+            target = step.get("target")
+            if not isinstance(target, str) or not target.strip():
+                return ToolResult(tool, False, "invalid target", {"started": False, "completed": False})
+            if step.get("action", "open") not in ("open", "close"):
+                return ToolResult(tool, False, "invalid action", {"started": False, "completed": False})
+            conf = step.get("min_confidence", 0.6)
+            if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0 <= conf <= 1:
+                return ToolResult(tool, False, "invalid min_confidence", {"started": False, "completed": False})
             return None
         if tool == "visual_scroll":
             amount = step.get("amount")

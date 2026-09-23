@@ -30,6 +30,10 @@ _log = logging.getLogger("jarvis.windows")
 
 WINDOW_ACTIONS = ("minimize", "maximize", "restore")
 RECT_TOLERANCE_PX = 16
+SNAP_POS_TOLERANCE_PX = 32
+SNAP_SIZE_TOLERANCE_PX = 64
+STATE_TIMEOUT_S = 4.0
+STATE_POLL_S = 0.25
 FOCUS_SETTLE_S = 0.3
 CLOSE_TIMEOUT_S = 8.0
 HUNG_PROBE_TIMEOUT_MS = 1500
@@ -94,6 +98,66 @@ def _is_alive(hwnd: int) -> bool:
         return bool(w32.IsWindow(hwnd))
     except Exception:
         return True
+
+
+def work_area(computer) -> dict[str, int]:
+    """Usable desktop rect (taskbar excluded), screen fallback.
+
+    ``pyautogui.size()`` returns the full primary monitor including the
+    taskbar; snapping against it parks windows underneath it. The Win32
+    work area is preferred where available.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(
+                0x0030, 0, ctypes.byref(rect), 0):
+            return {"x": int(rect.left), "y": int(rect.top),
+                    "width": int(rect.right - rect.left),
+                    "height": int(rect.bottom - rect.top)}
+    except Exception:
+        pass
+    size = computer.screen_size() or {"width": 1920, "height": 1080}
+    return {"x": 0, "y": 0, "width": size["width"],
+            "height": size["height"]}
+
+
+LAYOUTS = ("left", "right", "top", "bottom", "maximize")
+
+
+def layout_rect(layout: str, work: dict[str, int]) -> dict[str, int] | None:
+    """Target rectangle for a named half (or full work area)."""
+    if layout not in LAYOUTS:
+        return None
+    if layout == "maximize":
+        return dict(work)
+    if layout == "left":
+        half = work["width"] // 2
+        return {"x": work["x"], "y": work["y"],
+                "width": half, "height": work["height"]}
+    if layout == "right":
+        half = work["width"] // 2
+        return {"x": work["x"] + half, "y": work["y"],
+                "width": work["width"] - half, "height": work["height"]}
+    if layout == "top":
+        half = work["height"] // 2
+        return {"x": work["x"], "y": work["y"],
+                "width": work["width"], "height": half}
+    half = work["height"] // 2
+    return {"x": work["x"], "y": work["y"] + half,
+            "width": work["width"], "height": work["height"] - half}
+
+
+def rects_match(actual: dict[str, int], want: dict[str, int],
+                pos_tol: int = SNAP_POS_TOLERANCE_PX,
+                size_tol: int = SNAP_SIZE_TOLERANCE_PX) -> bool:
+    """Position must match; size is tolerant (DWM gaps/frames vary)."""
+    return (abs(actual.get("x", -9999) - want["x"]) <= pos_tol
+            and abs(actual.get("y", -9999) - want["y"]) <= pos_tol
+            and abs(actual.get("width", -9999) - want["width"]) <= size_tol
+            and abs(actual.get("height", -9999) - want["height"])
+            <= size_tol)
 
 
 def _is_hung(hwnd: int) -> bool | None:
@@ -298,6 +362,31 @@ class WindowManager:
             return {"ok": True, "found": True, "ambiguous": False,
                     "window": matches[0], "candidates": matches,
                     "resolve_ms": _ms(t0)}
+        titles = {w["title"].lower() for w in matches}
+        if len(titles) == 1:
+            # Identical titles: asking "which one" is unanswerable, so
+            # resolve by attention instead — the foreground window if it
+            # is one of them, else the most recently focused one. The
+            # choice is reported (selection) and verified downstream.
+            hwnds = [w["hwnd"] for w in matches]
+            foreground = self._foreground_hwnd()
+            if foreground in hwnds:
+                pick = next(w for w in matches
+                            if w["hwnd"] == foreground)
+                self.last_error = None
+                return {"ok": True, "found": True, "ambiguous": False,
+                        "window": pick, "candidates": matches,
+                        "selection": "active_window",
+                        "resolve_ms": _ms(t0)}
+            for recent in reversed(self._focus_history):
+                if recent in hwnds:
+                    pick = next(w for w in matches
+                                if w["hwnd"] == recent)
+                    self.last_error = None
+                    return {"ok": True, "found": True, "ambiguous": False,
+                            "window": pick, "candidates": matches,
+                            "selection": "recently_used",
+                            "resolve_ms": _ms(t0)}
         self.last_error = "ambiguous window"
         return {"ok": True, "found": False, "ambiguous": True,
                 "reason": "ambiguous", "target": target.strip(),
@@ -316,15 +405,25 @@ class WindowManager:
                     "reason": resolved.get("reason", "target not found"),
                     "focus_ms": _ms(t0)}
         window = resolved["window"]
-        if not self.computer.focus_window(window["title"]):
-            return _fail("focus_failed", target=target.strip(),
-                         window=window, focus_ms=_ms(t0))
+        # Pin the handle: focusing by title can land on a same-titled
+        # sibling (two Chromes), then fail our own hwnd verification.
+        focus_hwnd = getattr(self.computer, "focus_hwnd", None)
+        focused = focus_hwnd(window["hwnd"]) if callable(focus_hwnd) \
+            else False
+        if not focused:
+            # Fall back to the title path for controllers that only
+            # implement the legacy call (fakes, exotic platforms).
+            if not self.computer.focus_window(window["title"]):
+                return _fail("focus_failed", target=target.strip(),
+                             window=window, focus_ms=_ms(t0))
         # Verify by hwnd, not title: titles can repeat, handles cannot.
         confirmed = self._foreground_hwnd() == window["hwnd"]
         if confirmed:
             self._remember(window["hwnd"])
             return {"ok": True, "window": self.active(),
-                    "resolved": window, "focus_ms": _ms(t0)}
+                    "resolved": window,
+                    "selection": resolved.get("selection"),
+                    "focus_ms": _ms(t0)}
         return _fail("focus_failed", target=target.strip(),
                      window=window, focus_ms=_ms(t0))
 
@@ -386,31 +485,34 @@ class WindowManager:
         if not _is_alive(window["hwnd"]):
             return _fail("stale_window", target=target.strip(),
                          window=window, state_ms=_ms(t0))
+        # Pin the handle, not the title: Chrome retitles per tab and a
+        # title re-lookup can hand us a different window (or nothing).
+        live = self._live(window["hwnd"])
+        if live is None:
+            return _fail("stale_window", target=target.strip(),
+                         window=window, state_ms=_ms(t0))
         try:
-            matches = gw.getWindowsWithTitle(window["title"])
-            live = next((w for w in matches
-                         if getattr(w, "_hWnd", None) == window["hwnd"]),
-                        None)
-            if live is None:
-                return _fail("stale_window", target=target.strip(),
-                             window=window, state_ms=_ms(t0))
             if state == "minimize":
                 live.minimize()
             elif state == "maximize":
                 live.maximize()
             else:
                 live.restore()
-            time.sleep(FOCUS_SETTLE_S)
         except Exception as exc:
             return _fail("state_failed", target=target.strip(),
                          error=str(exc)[:200], state_ms=_ms(t0))
-        after = self._describe_hwnd(window["hwnd"])
-        good = after is not None and (
-            (state == "minimize" and after["minimized"])
-            or (state == "maximize" and after["maximized"])
-            or (state == "restore"
-                and not after["minimized"] and not after["maximized"]))
-        if good:
+
+        def _reached(desc):
+            if state == "minimize":
+                return desc["minimized"]
+            if state == "maximize":
+                return desc["maximized"]
+            # Restore can cross a maximized transient on the way back;
+            # poll until it settles instead of sampling once.
+            return not desc["minimized"] and not desc["maximized"]
+
+        after = self._poll_desc(window["hwnd"], _reached)
+        if after is not None and _reached(after):
             return {"ok": True, "window": after, "state": state,
                     "state_ms": _ms(t0)}
         return _fail("state_not_reached", target=target.strip(),
@@ -440,120 +542,107 @@ class WindowManager:
                     "reason": resolved.get("reason", "target not found"),
                     "move_ms": _ms(t0)}
         window = resolved["window"]
+        live = self._live(window["hwnd"])
+        if live is None:
+            return _fail("stale_window", target=target.strip(),
+                         move_ms=_ms(t0))
         try:
-            matches = gw.getWindowsWithTitle(window["title"])
-            live = next((w for w in matches
-                         if getattr(w, "_hWnd", None) == window["hwnd"]),
-                        None)
-            if live is None:
-                return _fail("stale_window", target=target.strip(),
-                             move_ms=_ms(t0))
             try:
                 live.restore()  # maximized windows ignore geometry calls
             except Exception:
                 pass
             live.moveTo(x, y)
             live.resizeTo(width, height)
-            time.sleep(FOCUS_SETTLE_S)
         except Exception as exc:
             return _fail("move_failed", target=target.strip(),
                          error=str(exc)[:200], move_ms=_ms(t0))
-        after = self._describe_hwnd(window["hwnd"])
+
+        def _positioned(desc):
+            rect = desc["rect"]
+            return (abs(rect["x"] - x) <= RECT_TOLERANCE_PX
+                    and abs(rect["y"] - y) <= RECT_TOLERANCE_PX)
+
+        after = self._poll_desc(window["hwnd"], _positioned)
         if after is None:
             return _fail("stale_window", target=target.strip(),
                          move_ms=_ms(t0))
         rect = after["rect"]
-        close = (abs(rect["x"] - x) <= RECT_TOLERANCE_PX
-                 and abs(rect["y"] - y) <= RECT_TOLERANCE_PX
-                 and abs(rect["width"] - width) <= RECT_TOLERANCE_PX
-                 and abs(rect["height"] - height) <= RECT_TOLERANCE_PX)
         # DWM clamps/resizes decorated frames: position match is the
         # binding check, size match is best-effort evidence.
-        positioned = (abs(rect["x"] - x) <= RECT_TOLERANCE_PX
-                      and abs(rect["y"] - y) <= RECT_TOLERANCE_PX)
-        if positioned:
+        size_exact = (abs(rect["width"] - width) <= RECT_TOLERANCE_PX
+                      and abs(rect["height"] - height) <= RECT_TOLERANCE_PX)
+        if _positioned(after):
             return {"ok": True, "window": after,
                     "requested": {"x": x, "y": y,
                                   "width": width, "height": height},
-                    "size_exact": bool(close), "move_ms": _ms(t0)}
+                    "size_exact": bool(size_exact), "move_ms": _ms(t0)}
         return _fail("move_not_reached", target=target.strip(),
                      window=after, move_ms=_ms(t0))
 
     def snap(self, target: str, side: str) -> dict[str, Any]:
-        """Snap one window to a screen half (Win+Left / Win+Right)."""
+        """Snap one window to a work-area half, verified by geometry.
+
+        Left/right use the native Win+Arrow snap (shell-aware); top and
+        bottom halves have no hotkey, so they move/resize directly into
+        the layout rectangle. Either way the result is polled against
+        the expected rectangle, not assumed from the keypress.
+        """
         t0 = time.monotonic()
-        if side not in ("left", "right"):
+        if side not in ("left", "right", "top", "bottom"):
             return _fail("invalid_side", side=side, snap_ms=_ms(t0))
-        size = self.computer.screen_size()
-        if size is None:
-            return _fail("no_screen_size", snap_ms=_ms(t0))
+        work = work_area(self.computer)
+        want = layout_rect(side, work)
         focused = self.focus(target)
         if not focused.get("ok"):
             return {**focused, "ok": False,
                     "reason": focused.get("reason", "focus_failed"),
                     "snap_ms": _ms(t0)}
-        try:
-            if side == "left":
-                self.computer.hotkey("win", "left")
-            else:
-                self.computer.hotkey("win", "right")
-            time.sleep(0.8)
-        except Exception as exc:
-            return _fail("snap_failed", target=target,
-                         error=str(exc)[:200], snap_ms=_ms(t0))
-        after = self._describe_hwnd(focused["window"].get("hwnd"))
-        if after is None:
-            return _fail("stale_window", target=target, snap_ms=_ms(t0))
-        want_x = 0 if side == "left" else size["width"] // 2
-        if abs(after["rect"].get("x", -999) - want_x) \
-                <= RECT_TOLERANCE_PX * 2:
-            return {"ok": True, "window": after, "side": side,
-                    "snap_ms": _ms(t0)}
-        return _fail("snap_not_reached", target=target, window=after,
-                     snap_ms=_ms(t0))
-
-    def arrange(self, left_target: str, right_target: str) -> dict[str, Any]:
-        """Snap two windows left/right (Win+Left / Win+Right), verified.
-
-        Native snap is preferred over manual geometry: it respects the
-        shell, taskbar and DPI scaling instead of fighting them.
-        """
-        t0 = time.monotonic()
-        size = self.computer.screen_size()
-        if size is None:
-            return _fail("no_screen_size", arrange_ms=_ms(t0))
-        half = size["width"] // 2
-        placed: dict[str, Any] = {}
-        for target, key in ((left_target, "win+left"),
-                            (right_target, "win+right")):
-            focused = self.focus(target)
-            if not focused.get("ok"):
-                return {**focused, "ok": False,
-                        "reason": focused.get("reason", "focus_failed"),
-                        "arrange_ms": _ms(t0)}
+        hwnd = focused["window"].get("hwnd")
+        if side in ("left", "right"):
             try:
-                if key == "win+left":
+                if side == "left":
                     self.computer.hotkey("win", "left")
                 else:
                     self.computer.hotkey("win", "right")
-                time.sleep(0.8)
             except Exception as exc:
                 return _fail("snap_failed", target=target,
-                             error=str(exc)[:200], arrange_ms=_ms(t0))
-            placed[target] = self._describe_hwnd(
-                focused["window"].get("hwnd"))
-        left_rect = (placed[left_target] or {}).get("rect", {})
-        right_rect = (placed[right_target] or {}).get("rect", {})
-        left_ok = abs(left_rect.get("x", -999)) <= RECT_TOLERANCE_PX * 2
-        right_ok = (abs(right_rect.get("x", -999) - half)
-                    <= RECT_TOLERANCE_PX * 2)
-        if left_ok and right_ok:
-            return {"ok": True, "left": placed[left_target],
-                    "right": placed[right_target],
-                    "arrange_ms": _ms(t0)}
-        return _fail("arrange_not_reached", left=placed.get(left_target),
-                     right=placed.get(right_target),
-                     arrange_ms=_ms(t0))
+                             error=str(exc)[:200], snap_ms=_ms(t0))
+        else:
+            moved = self.move_resize(target, want["x"], want["y"],
+                                     want["width"], want["height"])
+            if not moved.get("ok"):
+                return {**moved, "snap_ms": _ms(t0)}
+        after = self._poll_desc(
+            hwnd, lambda desc: rects_match(desc["rect"], want))
+        if after is not None and rects_match(after["rect"], want):
+            return {"ok": True, "window": after, "side": side,
+                    "layout": want, "snap_ms": _ms(t0)}
+        return _fail("snap_not_reached", target=target, window=after,
+                     layout=want, snap_ms=_ms(t0))
+
+    def arrange(self, left_target: str, right_target: str) -> dict[str, Any]:
+        """Snap two windows left/right against the work area, verified.
+
+        Native snap is preferred over manual geometry: it respects the
+        shell, taskbar and DPI scaling instead of fighting them. Both
+        final rectangles (position AND size) are checked.
+        """
+        t0 = time.monotonic()
+        work = work_area(self.computer)
+        placed: dict[str, Any] = {}
+        for target, side in ((left_target, "left"),
+                             (right_target, "right")):
+            one = self.snap(target, side)
+            if not one.get("ok"):
+                return {**one, "ok": False,
+                        "reason": one.get("reason", "snap_failed"),
+                        "arrange_ms": _ms(t0)}
+            placed[target] = one["window"]
+        return {"ok": True, "left": placed[left_target],
+                "right": placed[right_target],
+                "layout": {"left": layout_rect("left", work),
+                           "right": layout_rect("right", work)},
+                "arrange_ms": _ms(t0)}
 
     # ------------------------------------------------------------------
     # HEALTH — hung detection + graceful close/restart of one hwnd
@@ -682,6 +771,46 @@ class WindowManager:
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _live(hwnd: int):
+        """The live automation object for a handle (title-churn safe).
+
+        Re-looking windows up by title breaks the moment an app renames
+        itself (Chrome retitles per tab/navigation). Handles are stable,
+        so actions pin the hwnd and re-fetch the object per attempt.
+        """
+        try:
+            for w in gw.getAllWindows():
+                try:
+                    if getattr(w, "_hWnd", None) == hwnd:
+                        return w
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _poll_desc(self, hwnd: int, predicate, timeout: float = STATE_TIMEOUT_S):
+        """Poll a handle's description until ``predicate`` holds it.
+
+        Replaces single-sample-then-sleep verification: DWM/Chrome
+        animations cross the 300ms mark regularly, and one mid-flight
+        sample used to report phantom failures. Returns the matching
+        description, or the last seen one (None if never observed).
+        """
+        deadline = time.monotonic() + max(0.2, timeout)
+        last = None
+        while time.monotonic() < deadline:
+            last = self._describe_hwnd(hwnd)
+            if last is not None:
+                try:
+                    if predicate(last):
+                        return last
+                except Exception:
+                    pass
+            time.sleep(STATE_POLL_S)
+        return last
 
     def _hwnd_present(self, hwnd: int, title: str) -> bool:
         if not _is_alive(hwnd):

@@ -100,30 +100,14 @@ def category_for(path: str | Path) -> str:
 def resolve_user_directory(value: str | None) -> Path | None:
     """Resolve a spoken / typed directory name to a real path.
 
-    Accepts an explicit path first; otherwise maps friendly names such as
-    "downloads", "my downloads" or "the desktop folder" to the real home
-    directory folder. Returns ``None`` when nothing trustworthy matches, so a
-    caller never silently operates on the wrong folder.
+    Organization work only ever touches folders that exist, so this is
+    the must-exist view over the shared ``tools.filesystem``
+    resolver — one resolution rule for the whole agent. Returns
+    ``None`` when nothing trustworthy matches, so a caller never
+    silently operates on the wrong folder.
     """
-    if not value:
-        return None
-    raw = str(value).strip().strip("\"'")
-
-    candidate = Path(raw).expanduser()
-    try:
-        if candidate.exists():
-            return candidate.resolve()
-    except OSError:
-        pass
-
-    key = re.sub(r"\b(my|the|folder|directory|files)\b", " ", raw.lower())
-    key = re.sub(r"[^a-z0-9]+", "", key)
-    home_name = _HOME_ALIASES.get(key)
-    if home_name:
-        target = Path.home() / home_name
-        if target.exists():
-            return target.resolve()
-    return None
+    from tools.filesystem import resolve_user_path
+    return resolve_user_path(value, must_exist=True)
 
 
 def _iter_files(base: Path, recursive: bool = False) -> Iterable[Path]:

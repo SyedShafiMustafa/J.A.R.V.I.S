@@ -717,7 +717,6 @@ def test_planner_rejects_bad_visual_payloads():
     from agents.ollama_errors import PlannerValidationError
     bad_steps = [
         {"tool": "visual_scroll", "amount": "far"},
-        {"tool": "visual_click", "target": "x", "bogus": 1},
         {"tool": "screenshot", "mode": "region", "region": "1,2"},
         {"tool": "locate_target"},
     ]
@@ -725,6 +724,23 @@ def test_planner_rejects_bad_visual_payloads():
         with pytest.raises(PlannerValidationError):
             TaskPlanner._validate_plan({"goal": "visual",
                                         "steps": [step]})
+
+
+def test_planner_strips_noise_keys_and_null_optionals():
+    from agents.planner import TaskPlanner
+    plan = {"goal": "visual", "steps": [
+        {"tool": "visual_click", "target": "x", "bogus": 1},
+        {"tool": "create_file", "path": "a.txt", "content": None},
+    ]}
+    TaskPlanner._validate_plan(plan)
+    assert plan["steps"][0] == {"tool": "visual_click", "target": "x"}
+    assert plan["steps"][1] == {"tool": "create_file", "path": "a.txt"}
+    # ...but a null on a REQUIRED field still fails.
+    from agents.ollama_errors import PlannerValidationError
+    with pytest.raises(PlannerValidationError):
+        TaskPlanner._validate_plan({"goal": "visual", "steps": [
+            {"tool": "visual_click", "target": None},
+        ]})
 
 
 def test_visual_permission_levels():

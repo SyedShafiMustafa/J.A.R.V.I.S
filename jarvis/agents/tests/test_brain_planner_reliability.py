@@ -104,7 +104,7 @@ def test_planner_accepts_valid_plan(monkeypatch):
     {"goal": "x"},
     {"goal": "x", "steps": [{"tool": "unknown"}]},
     {"goal": "x", "steps": [{"tool": "type", "text": 4}]},
-    {"goal": "x", "steps": [{"tool": "open_youtube", "url": "unsafe"}]},
+    {"goal": "x", "steps": [{"tool": "press", "key": 42}]},
     {"goal": "x", "steps": [{"tool": "click_text"}]},
 ])
 def test_planner_rejects_invalid_shapes(monkeypatch, plan):
@@ -112,6 +112,17 @@ def test_planner_rejects_invalid_shapes(monkeypatch, plan):
     monkeypatch.setattr("agents.ollama_client.requests.post", lambda *a, **k: response)
     with pytest.raises(PlannerValidationError):
         TaskPlanner().create_plan("do it")
+
+
+def test_planner_strips_noise_keys_but_keeps_contract(monkeypatch):
+    response = planner_response({
+        "goal": "x",
+        "steps": [{"tool": "open_youtube", "url": "unsafe",
+                   "description": "open it"}],
+    })
+    monkeypatch.setattr("agents.ollama_client.requests.post", lambda *a, **k: response)
+    plan = TaskPlanner().create_plan("do it")
+    assert plan["steps"] == [{"tool": "open_youtube"}]
 
 
 def test_planner_rejects_malformed_json(monkeypatch):

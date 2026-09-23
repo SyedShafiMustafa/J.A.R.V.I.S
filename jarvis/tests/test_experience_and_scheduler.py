@@ -162,12 +162,47 @@ def test_scheduler_duplicate_prevention():
     with tempfile.TemporaryDirectory() as tmp:
         sched = TaskScheduler(db_path=Path(tmp) / "sched.db")
         try:
+            # Identical repeat: same id, no second copy.
             a = sched.schedule_task("reminder", {"remind": "water"}, delay_seconds=3600)
-            b = sched.schedule_task("reminder", {"remind": "water"}, delay_seconds=9999)
+            b = sched.schedule_task("reminder", {"remind": "water"}, delay_seconds=3600)
             assert a == b
             assert len(sched.list_scheduled_tasks()) == 1
+            # Same words, different time: a DIFFERENT request. The old
+            # behavior silently kept the first time while promising the
+            # new one; both must now exist.
+            c = sched.schedule_task("reminder", {"remind": "water"}, delay_seconds=9999)
+            assert c != a
+            assert len(sched.list_scheduled_tasks()) == 2
         finally:
             sched.close()
+
+
+def test_scheduler_rejects_bad_timing():
+    with tempfile.TemporaryDirectory() as tmp:
+        sched = TaskScheduler(db_path=Path(tmp) / "sched.db")
+        try:
+            for bad in (-1, float("nan"), True):
+                with pytest.raises(ValueError):
+                    sched.schedule_task("reminder", {"remind": "x"},
+                                        delay_seconds=bad)
+                with pytest.raises(ValueError):
+                    sched.schedule_task("recurring_reminder", {"remind": "x"},
+                                        interval_seconds=bad)
+        finally:
+            sched.close()
+
+
+def test_parse_schedule_request_days_weeks_and_cancel_target():
+    parsed = parse_schedule_request("remind me in 2 days to pay rent")
+    assert parsed is not None and parsed["kind"] == "remind"
+    assert parsed["delay_seconds"] == 2 * 86400
+    parsed = parse_schedule_request("remind me in 1 week to review notes")
+    assert parsed is not None and parsed["delay_seconds"] == 7 * 86400
+    parsed = parse_schedule_request("cancel my 10 minute reminder")
+    assert parsed is not None and parsed["kind"] == "cancel"
+    assert "10" in parsed["target"] and "minute" in parsed["target"]
+    parsed = parse_schedule_request("cancel my reminders")
+    assert parsed is not None and parsed["target"] == ""
 
 
 def test_scheduler_cancel():

@@ -511,8 +511,27 @@ class JarvisBackendService:
             self.emit({"type": "status", "status": STATUS_IDLE})
         return 200, {"received": text}
 
-    def handle_stop(self) -> tuple[int, dict[str, Any]]:
+    def _clear_pending(self) -> None:
+        """Drop every outstanding question/preview so the next utterance
+        starts clean. A stop that leaves an armed organize preview makes
+        the NEXT unrelated sentence answer a dead question."""
         self._pending_clarification = None
+        self._pending_organize = None
+
+    def _stop_task_audio(self, runtime: dict[str, Any] | None) -> None:
+        """Halt in-flight speech for a stop; never fail the stop itself."""
+        try:
+            audio = (runtime or {}).get("audio")
+            if audio is not None and hasattr(audio, "stop_speaking"):
+                audio.stop_speaking()
+        except Exception:
+            _log.debug("stop-speaking during halt failed", exc_info=True)
+
+    def handle_stop(self) -> tuple[int, dict[str, Any]]:
+        self._clear_pending()
+        # A stop hands control back to the user: stale error banners
+        # from earlier turns must not survive it.
+        self.state.clear_error()
         if self._runtime is not None:
             lifecycle = self._runtime.get("lifecycle")
             if lifecycle is not None:
@@ -520,6 +539,7 @@ class JarvisBackendService:
                     lifecycle.emergency_stop()
                 except Exception:
                     _log.exception("emergency stop lifecycle call failed")
+            self._stop_task_audio(self._runtime)
         if self._voice_mode:
             self.stop_listening()
         self.state.set_status(STATUS_IDLE)
@@ -683,15 +703,38 @@ class JarvisBackendService:
         audio = runtime.get("audio")
 
         if parsed["kind"] == "cancel":
-            cancelled = 0
-            for task in scheduler.list_scheduled_tasks():
-                if scheduler.cancel_task(task["id"]):
-                    cancelled += 1
-            reply = (
-                f"Cancelled {cancelled} reminder{'s' if cancelled != 1 else ''}."
-                if cancelled else "You have no reminders to cancel."
-            )
-            self.emit({"type": "scheduled", "kind": "cancel", "cancelled": cancelled})
+            target = (parsed.get("target") or "").strip().lower()
+            pending = scheduler.list_scheduled_tasks()
+            if target:
+                # Targeted cancel: only reminders whose text matches.
+                # Anything unmatched is left alone and reported.
+                matched = [t for t in pending
+                           if target in str(
+                               (t.get("payload") or {}).get("remind", "")
+                           ).lower()]
+            else:
+                matched = list(pending)
+            cancelled = [t for t in matched
+                         if scheduler.cancel_task(t["id"])]
+            names = ", ".join(
+                str((t.get("payload") or {}).get("remind", "reminder"))[:60]
+                for t in cancelled)
+            if cancelled and target:
+                reply = (f"Cancelled {len(cancelled)} reminder"
+                         f"{'s' if len(cancelled) != 1 else ''}: {names}.")
+            elif cancelled:
+                reply = (f"Cancelled {len(cancelled)} reminder"
+                         f"{'s' if len(cancelled) != 1 else ''}: {names}.")
+            elif target and pending:
+                reply = ("I couldn't find a reminder matching "
+                         f"'{parsed['target']}'. You have "
+                         f"{len(pending)} reminder"
+                         f"{'s' if len(pending) != 1 else ''} set.")
+            else:
+                reply = "You have no reminders to cancel."
+            self.emit({"type": "scheduled", "kind": "cancel",
+                       "cancelled": len(cancelled),
+                       "matched": [t["id"] for t in cancelled]})
             if audio is not None:
                 self._speak(audio, reply)
             return True
@@ -706,7 +749,9 @@ class JarvisBackendService:
             task_id = scheduler.schedule_task(
                 "recurring_reminder", {"remind": action}, interval_seconds=parsed["interval_seconds"]
             )
-            reply = f"Okay, I'll remind you to {action} every {humanize_seconds(parsed['interval_seconds'])}."
+            reply = (f"Okay, I'll remind you to {action} every "
+                     f"{humanize_seconds(parsed['interval_seconds'])}, "
+                     f"starting now.")
 
         self.emit({
             "type": "scheduled",
@@ -1093,6 +1138,25 @@ class JarvisBackendService:
                 "user_message",
                 "I couldn't safely plan that task. Please try again.",
             )
+            try:
+                from agents.ollama_errors import PlannerValidationError
+                if isinstance(exc, PlannerValidationError):
+                    # An action request that became instructions/invalid
+                    # output instead of a tool call: record the mismatch
+                    # as operational experience (bounded lesson text).
+                    save = getattr(memory, "save_experience", None)
+                    if callable(save):
+                        save(
+                            scenario=f"action-request:{text[:120]}",
+                            strategy="planner",
+                            outcome="failure",
+                            lesson=("planner returned instructions or "
+                                    "invalid output instead of a tool "
+                                    "call; keep operational requests in "
+                                    "tool JSON")[:300],
+                        )
+            except Exception:
+                _log.debug("mismatch lesson save failed", exc_info=True)
             self._set_error(message)
             self.emit({"type": "error", "message": message})
             self._speak(audio, message)
@@ -1114,6 +1178,11 @@ class JarvisBackendService:
             for step in task.steps:
                 if lifecycle.shutdown_requested:
                     session.cancel_active_task()
+                    # Do not vanish silently: mark the task failed so the
+                    # HUD/timeline show a stop instead of a hang. (The
+                    # stop path itself already spoke "Stopped.".)
+                    task.fail("stopped")
+                    bus.publish(task_failed(task, session_id=session.id))
                     return
 
                 call = ToolCall(
@@ -1184,9 +1253,16 @@ class JarvisBackendService:
             _log.exception("action failed")
             task.fail(f"unexpected error: {exc}")
             bus.publish(task_failed(task, session_id=session.id))
-            self._speak(audio, "Something went wrong.")
+            # Name the failing goal instead of a bare "something": the
+            # exception text itself stays in the log, not in speech.
+            fallback = (f"I couldn't finish '{task.goal}'. "
+                        "Please try again.") if task.goal else \
+                "Something went wrong."
+            self._set_error(fallback)
+            self.emit({"type": "error", "message": fallback})
+            self._speak(audio, fallback)
             if conversation_id:
-                memory.save_message(conversation_id, "assistant", "Something went wrong.")
+                memory.save_message(conversation_id, "assistant", fallback)
                 memory.maybe_summarize(conversation_id)
         finally:
             session.active_task = None
@@ -1244,10 +1320,18 @@ class JarvisBackendService:
             memory.save_memory(text, reply)
             session.note_reply(reply)
         else:
-            self.state.set_status(STATUS_IDLE)
-            self.emit({"type": "status", "status": STATUS_IDLE})
+            # An empty brain turn must still answer: silence looks like a
+            # hang and leaves no transcript for the next turn's context.
+            fallback = "Sorry, I didn't catch that. Could you say it again?"
+            self._speak(audio, fallback)
+            if conversation_id:
+                memory.save_message(conversation_id, "assistant", fallback)
 
     def _speak(self, audio: Any, text: str) -> None:
+        # A failure message spoken right after _set_error must not erase
+        # the ERROR state on its way out: remember it and re-assert it.
+        prior_error = self.state.status == STATUS_ERROR
+        prior_message = self.state.error_message
         self._set_phase(PHASE_SPEAKING)
         self.state.set_status(STATUS_SPEAKING)
         self.emit({"type": "status", "status": STATUS_SPEAKING})
@@ -1266,7 +1350,12 @@ class JarvisBackendService:
                 "tts_playback_ms=%.0f chars=%d",
                 (time.monotonic() - speak_at) * 1000, len(text),
             )
-            if self.state.status not in {STATUS_ERROR}:
+            if prior_error:
+                self.state.set_status(STATUS_ERROR)
+                self._set_phase(PHASE_ERROR)
+                if prior_message:
+                    self.state.error_message = prior_message
+            elif self.state.status not in {STATUS_ERROR}:
                 self.state.set_status(STATUS_IDLE)
                 self._set_phase(PHASE_IDLE)
                 self.emit({"type": "status", "status": STATUS_IDLE})
@@ -1381,6 +1470,9 @@ class JarvisBackendService:
         if self.state.status == STATUS_SPEAKING:
             _log.info("User interrupt detected during TTS")
             self.state.set_status(STATUS_LISTENING)
+            # Status alone is not enough: a LISTENING status with a
+            # SPEAKING phase shows contradictory HUD state.
+            self._set_phase(PHASE_WAKE_LISTENING)
             self.emit({"type": "status", "status": STATUS_LISTENING})
             self.emit({"type": "interrupt", "message": "User interrupted"})
 
@@ -1498,6 +1590,41 @@ class JarvisBackendService:
 
                 session.note_user(user)
 
+                # Emergency stop wins over every pending question: "stop"
+                # must halt, never answer a dead clarification/organize
+                # prompt. (Matches the text path, which checks it first.)
+                if _is_emergency_stop_phrase(user):
+                    interrupt = runtime.get("lifecycle")
+                    if interrupt is not None:
+                        try:
+                            interrupt.emergency_stop()
+                        except Exception:
+                            _log.exception("emergency stop failed")
+                    self._clear_pending()
+                    self._stop_task_audio(runtime)
+                    self.emit({"type": "emergency_stop", "ok": True})
+                    self.state.clear_error()
+                    self._speak(audio, "Stopped.")
+                    self.state.set_status(STATUS_LISTENING)
+                    self._set_phase(PHASE_WAKE_LISTENING)
+                    _timeline_log.info("emergency_stop phrase=%r", user)
+                    return
+
+                # Answer to a pending "which chat did you mean?" question.
+                if self._pending_clarification is not None and self._answer_clarification(
+                    runtime, user
+                ):
+                    timeout = time.monotonic() + idle_window
+                    continue
+
+                # Pending organize preview answers before any new schedule
+                # is parsed, so "cancel my reminders" cannot leak into a
+                # dead preview answer (and a yes/no never reaches the
+                # scheduler by accident).
+                if self._pending_organize is not None and self._answer_organize(runtime, user):
+                    timeout = time.monotonic() + idle_window
+                    continue
+
                 # Reminders / recurring schedules via the normal voice surface.
                 if self._handle_schedule_command(runtime, user):
                     timeout = time.monotonic() + idle_window
@@ -1515,30 +1642,6 @@ class JarvisBackendService:
                     self._run_action(runtime, user, plan=whatsapp_plan)
                     timeout = time.monotonic() + idle_window
                     continue
-
-                # Emergency stop: immediate halt of the active turn.
-                # Answer to a pending "which chat did you mean?" question.
-                if self._pending_clarification is not None and self._answer_clarification(
-                    runtime, user
-                ):
-                    timeout = time.monotonic() + idle_window
-                    continue
-
-                if self._pending_organize is not None and self._answer_organize(runtime, user):
-                    timeout = time.monotonic() + idle_window
-                    continue
-
-                if _is_emergency_stop_phrase(user):
-                    interrupt = runtime.get("lifecycle")
-                    if interrupt is not None:
-                        try:
-                            interrupt.emergency_stop()
-                        except Exception:
-                            _log.exception("emergency stop failed")
-                    self._speak(audio, "Stopped.")
-                    self._set_phase(PHASE_WAKE_LISTENING)
-                    _timeline_log.info("emergency_stop phrase=%r", user)
-                    return
 
                 self._set_phase(PHASE_THINKING)
                 decision = orchestrator.decide(user)

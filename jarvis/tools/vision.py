@@ -203,12 +203,17 @@ class ScreenVision:
 
         image.save(path)
 
-        data = pytesseract.image_to_data(
-            Image.open(path),
-            output_type=pytesseract.Output.DICT
-        )
-
-        os.remove(path)
+        try:
+            data = pytesseract.image_to_data(
+                Image.open(path),
+                output_type=pytesseract.Output.DICT
+            )
+        finally:
+            # Screenshots must never linger in temp on OCR failure.
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
         ox, oy = offset
         elements = []

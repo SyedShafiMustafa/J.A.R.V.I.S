@@ -638,58 +638,12 @@ class LiveOrchestrator:
 
 
 def _is_action_request(text: str) -> bool:
-    action_words = [
-        "open",
-        "launch",
-        "start",
-        "close",
-        "search",
-        "find",
-        "play",
-        "click",
-        "type",
-        "write",
-        "message",
-        "send",
-        "scroll",
-        "press",
-        "youtube",
-        "google",
-        # computer-use verbs (filesystem / terminal / git / python tools)
-        "create",
-        "make",
-        "new file",
-        "file",
-        "folder",
-        "directory",
-        "delete",
-        "remove",
-        "rename",
-        "move",
-        "copy",
-        "list",
-        "read",
-        "run",
-        "execute",
-        "terminal",
-        "command",
-        "shell",
-        "git",
-        "commit",
-        "checkpoint",
-        "python",
-        "script",
-        "test",
-        # file-management agent (analyze / organize / duplicates)
-        "organize",
-        "organise",
-        "sort",
-        "tidy",
-        "declutter",
-        "arrange",
-        "archive",
-        "duplicate",
-        "clean up",
-        "cleanup",
-    ]
-    return any(word in text for word in action_words)
+    """Single source of truth for action routing.
+
+    Delegates to the global action-vs-explanation model
+    (``core.intent``): imperative requests ACT (including polite forms
+    like "Can you open Chrome?"), explicit how-to questions EXPLAIN
+    (and therefore never reach the planner), everything else chats.
+    """
+    from core.intent import classify
+    return classify(text) == "act"

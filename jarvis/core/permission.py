@@ -68,6 +68,7 @@ _TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     "visual_type": PermissionLevel.NORMAL,
     "visual_drag": PermissionLevel.NORMAL,
     "visual_scroll": PermissionLevel.NORMAL,
+    "visual_menu": PermissionLevel.NORMAL,
     # Cross-application automation (Milestone 4). Window observation and
     # text extraction are read-only; acting across apps is normal.
     "list_windows": PermissionLevel.HARMLESS,

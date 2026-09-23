@@ -124,22 +124,25 @@ Special semantic target:
 33. visual_verify (re-observe and check an expected visual state)
 {"tool":"visual_verify","kind":"text_visible","text":"Hello"}
 
-34. list_windows (enumerate windows with titles, apps and geometry)
+34. visual_menu (open/close a menu-bar menu, verified by observation)
+{"tool":"visual_menu","target":"the File menu","action":"open"}
+
+35. list_windows (enumerate windows with titles, apps and geometry)
 {"tool":"list_windows","pattern":"Chrome"}
 
-35. switch_app (focus an application window, verified by handle)
+36. switch_app (focus an application window, verified by handle)
 {"tool":"switch_app","target":"Chrome"}
 
-36. window_manage (minimize/maximize/restore/move/snap/check/close)
+37. window_manage (minimize/maximize/restore/move/snap/check/close)
 {"tool":"window_manage","target":"Notepad","action":"maximize"}
 
-37. extract_window_text (OCR read-only, or clipboard for exact text)
+38. extract_window_text (OCR read-only, or clipboard for exact text)
 {"tool":"extract_window_text","target":"Notepad","method":"ocr"}
 
-38. read_clipboard (read clipboard text for handoff verification)
+39. read_clipboard (read clipboard text for handoff verification)
 {"tool":"read_clipboard"}
 
-39. run_workflow (verified cross-app tool sequence with data handoff)
+40. run_workflow (verified cross-app tool sequence with data handoff)
 {"tool":"run_workflow","goal":"Copy notes to clipboard","steps":[{"tool":"switch_app","target":"Notepad"},{"tool":"extract_window_text","method":"clipboard","save_as":"notes"}]}
 
 ========================
@@ -147,6 +150,12 @@ RULES
 ========================
 
 - Return ONLY JSON.
+- You are an OPERATING agent, not a tutorial bot: ALWAYS answer with
+  tool JSON that DOES the request. NEVER reply with instructions, user
+  steps, or how-to text — there is no text channel and any non-JSON is
+  a failure. "Maximize Chrome." means
+  {"tool":"window_manage","target":"Chrome","action":"maximize"} —
+  NEVER "To maximize Chrome, click...".
 - For desktop apps use open_app then wait_window.
 - Use click_text for visible UI elements.
 - Prefer a reliable native/direct tool (open_app, type, press, click_text,
@@ -159,6 +168,28 @@ RULES
   second, OCR/UIA third, visual clicking last.
 - For multi-step cross-app tasks prefer one run_workflow with per-step
   verification over loose tool sequences.
+- Menu-bar items (File, Edit, View, ...) are NEVER open_app: "open the
+  File menu" means visual_menu open on "the File menu" in the current
+  window, never launching anything. The ONLY "file" exception is the
+  application itself: "open File Explorer" means open_app file explorer.
+- "This file" / "report.pdf" / document names mean inspect_file and
+  friends, never open_app.
+- Clipboard verbs are hotkeys, never messaging targets: "copy" means
+  hotkey ctrl+c, "paste" means hotkey ctrl+v, "select all" means
+  hotkey ctrl+a, "cut" means hotkey ctrl+x. There is no message_box
+  outside a messaging application. After typing or pasting into a
+  document, verify with visual_verify text_visible on the typed text.
+- "Put X on the left/right/top/bottom" ALWAYS means window_manage
+  snap_left/snap_right/snap_top/snap_bottom on X — never locate,
+  click, or drag. "Maximize/minimize/restore X" ALWAYS means
+  window_manage with that action on X.
+- NEVER hedge with list_windows when the user named a target: emit
+  the window_manage/switch_app step directly. If several windows
+  match, the tool itself asks which one — a listing turn that acts on
+  nothing is a failure to operate.
+- "Close <app>" (whole program) means close_app; minimize/maximize/
+  restore/snap and single-window close mean window_manage; bringing a
+  window forward means switch_app or wait_window.
 - For ANY messaging application, use message_box instead of "Type a message".
 - Preserve contact names exactly.
 - Preserve message text exactly.
@@ -262,6 +293,55 @@ Response:
 """
 
 
+def _valid_nested_steps(value: object, schemas: dict) -> bool:
+    """Validate ``run_workflow`` nested steps against tool schemas."""
+    if not isinstance(value, list) or not value or len(value) > 50:
+        return False
+    for nested in value:
+        if not isinstance(nested, dict):
+            return False
+        tool = nested.get("tool")
+        if not isinstance(tool, str) or tool not in schemas:
+            return False
+        # run_workflow cannot nest (no recursive plans).
+        if tool == "run_workflow":
+            return False
+        required, optional = schemas[tool]
+        allowed = {**required, **optional}
+        # Workflow-control keys (handoff, postconditions, recovery
+        # context) are validated by the workflow engine, not here.
+        # Unknown noise keys are stripped like top-level steps.
+        for k in [k for k in nested
+                  if k not in ("tool", "save_as", "expect", "app",
+                               *allowed)]:
+            del nested[k]
+        if set(required) - set(nested):
+            return False
+        for field, field_type in allowed.items():
+            if field not in nested:
+                continue
+            item = nested[field]
+            if field_type is bool:
+                if not isinstance(item, bool):
+                    return False
+            elif field_type is int:
+                if not isinstance(item, int) or isinstance(item, bool):
+                    return False
+            elif field_type == (int, float):
+                if not isinstance(item, (int, float)) \
+                        or isinstance(item, bool):
+                    return False
+            elif field_type is list:
+                if not isinstance(item, list):
+                    return False
+            elif field_type is dict:
+                if not isinstance(item, dict):
+                    return False
+            elif not isinstance(item, str):
+                return False
+    return True
+
+
 class TaskPlanner:
 
     def __init__(self):
@@ -317,8 +397,48 @@ class TaskPlanner:
             plan = json.loads(content)
         except json.JSONDecodeError as exc:
             raise PlannerValidationError("planner returned malformed JSON") from exc
-        self._validate_plan(plan)
+        try:
+            self._validate_plan(plan)
+        except PlannerValidationError as exc:
+            # One bounded recovery: small local models often add a stray
+            # key or mistype one field while the intent is right. Feed
+            # the exact complaint back once instead of failing the turn.
+            plan = self._retry_with_feedback(messages, str(exc))
+            self._validate_plan(plan)
         return plan
+
+    def _retry_with_feedback(self, messages: list, error: str):
+        """Re-ask once, pointing at the validation failure."""
+        from agents.ollama_errors import (
+            OllamaError, OllamaMalformedResponseError,
+        )
+        retry_messages = list(messages) + [{
+            "role": "user",
+            "content": (
+                "Your last output failed validation: "
+                f"{error}. Return ONLY the corrected JSON plan, "
+                "no other text."
+            ),
+        }]
+        try:
+            content = self.provider.complete(retry_messages).strip()
+        except OllamaError:
+            raise
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise OllamaMalformedResponseError(
+                "invalid planner response") from exc
+        if content.startswith("```"):
+            try:
+                content = content.split("\n", 1)[1]
+                content = content.rsplit("```", 1)[0].strip()
+            except IndexError as exc:
+                raise PlannerValidationError(
+                    "planner returned malformed markdown") from exc
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise PlannerValidationError(
+                "planner returned malformed JSON") from exc
 
     @staticmethod
     def _validate_plan(plan: object) -> None:
@@ -389,6 +509,10 @@ class TaskPlanner:
                 {"kind": str},
                 {"text": str, "title": str},
             ),
+            "visual_menu": (
+                {"target": str},
+                {"action": str, "min_confidence": (int, float)},
+            ),
             "list_windows": ({}, {"pattern": str}),
             "switch_app": ({"target": str}, {}),
             "window_manage": (
@@ -411,8 +535,17 @@ class TaskPlanner:
                 raise PlannerValidationError(f"planner returned invalid tool: {tool}")
             required, optional = schemas[tool]
             allowed = {**required, **optional}
-            if set(step) - {"tool", *allowed}:
-                raise PlannerValidationError("planner action contains unexpected fields")
+            # Noise tolerance for chatty small models: a JSON null on an
+            # OPTIONAL field means "omitted" (standard JSON semantics),
+            # and unknown extra keys are stripped. Unknown TOOLS, missing
+            # REQUIRED fields and mistyped values still fail loudly —
+            # stripping never invents or weakens a required contract.
+            # (This mutates the parsed plan into its clean form.)
+            for key in [k for k in step if k not in ("tool", *allowed)]:
+                del step[key]
+            for key in [k for k in optional if step.get(k) is None
+                        and k in step]:
+                del step[key]
             if set(required) - set(step):
                 raise PlannerValidationError(f"planner action missing fields for {tool}")
             for field, field_type in allowed.items():
@@ -443,15 +576,10 @@ class TaskPlanner:
                         and not isinstance(value, bool) and value >= 0
                     )
                 elif tool == "run_workflow" and field == "steps":
-                    # Nested plan steps: non-empty dicts naming a tool.
-                    # (Nested payloads are validated at execution time.)
-                    valid = (
-                        isinstance(value, list) and bool(value)
-                        and len(value) <= 50
-                        and all(isinstance(s, dict)
-                                and isinstance(s.get("tool"), str)
-                                for s in value)
-                    )
+                    # Nested plan steps name real tools with their
+                    # required fields, so a bad workflow fails here
+                    # with a clear error instead of mid-execution.
+                    valid = _valid_nested_steps(value, schemas)
                 elif field_type is dict:
                     valid = isinstance(value, dict) and bool(value)
                 elif field_type is list:
@@ -469,4 +597,9 @@ class TaskPlanner:
                 else:
                     valid = isinstance(value, field_type) and bool(value.strip())
                 if not valid:
-                    raise PlannerValidationError(f"planner field {field} has an invalid type or value")
+                    # Include the offending value: the feedback retry
+                    # shows it to the model, which usually corrects a
+                    # mistyped field on the second attempt.
+                    raise PlannerValidationError(
+                        f"planner field {field} has an invalid type or "
+                        f"value (got {repr(value)[:80]})")

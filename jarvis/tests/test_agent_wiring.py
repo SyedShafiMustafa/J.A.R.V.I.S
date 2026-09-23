@@ -46,7 +46,6 @@ def test_planner_accepts_new_tools(plan):
     [
         {"goal": "g", "steps": [{"tool": "not_a_tool"}]},
         {"goal": "g", "steps": [{"tool": "send_whatsapp", "recipient": "Ahmed"}]},  # missing message
-        {"goal": "g", "steps": [{"tool": "git_status", "rogue": "x"}]},  # unexpected field
         {"goal": "g", "steps": [{"tool": "delete_file"}]},  # missing required path
         {"goal": "g", "steps": [{"tool": "execute_terminal", "command": "dir", "timeout": -1}]},
     ],
@@ -54,6 +53,14 @@ def test_planner_accepts_new_tools(plan):
 def test_planner_rejects_invalid_new_tool_steps(plan):
     with pytest.raises(PlannerValidationError):
         TaskPlanner._validate_plan(plan)
+
+
+def test_planner_strips_unknown_extra_keys():
+    # Noise tolerance: unknown extra keys are stripped, not rejected.
+    # Unknown tools / missing required fields / bad values still raise above.
+    plan = {"goal": "g", "steps": [{"tool": "git_status", "rogue": "x"}]}
+    TaskPlanner._validate_plan(plan)
+    assert plan["steps"][0] == {"tool": "git_status"}
 
 
 # ── Permission gate + resume ────────────────────────────────────────────────

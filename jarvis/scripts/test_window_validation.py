@@ -85,7 +85,8 @@ def our_focus_ok(agent):
     """True only when a test-owned Notepad file tab is in front."""
     active = agent.computer.get_active_window() or ""
     low = active.lower()
-    return ("notepad" in low and ("jarvis_m4" in low or "untitled" in low))
+    return ("notepad" in low
+            and ("jarvis_" in low or "untitled" in low))
 
 
 def gated_keys(agent, fn, name):

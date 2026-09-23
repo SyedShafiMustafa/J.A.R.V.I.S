@@ -61,6 +61,10 @@ def _truncate(value: Any, limit: int = TEXT_LIMIT) -> Any:
 class WorkflowEngine:
     """Compose existing tools into verified cross-app workflows."""
 
+    # ------------------------------------------------------------------
+    # Templating — structured handoff without LLM reinterpretation
+    # ------------------------------------------------------------------
+
     def __init__(self, step_runner: Callable[[dict[str, Any]], ToolResult],
                  visual: Any | None = None,
                  windows: Any | None = None,
@@ -69,25 +73,57 @@ class WorkflowEngine:
         self.visual = visual
         self.windows = windows
         self.computer = computer
-
-    # ------------------------------------------------------------------
-    # Templating — structured handoff without LLM reinterpretation
-    # ------------------------------------------------------------------
+        #: Template paths that resolved to nothing on the last
+        #: ``resolve_templates`` call. Steps run with "" substituted
+        #: (an empty argument beats a literal ``{{...}}`` reaching a
+        #: text field), but the miss is recorded so trails stay honest.
+        self.last_unresolved: list[str] = []
 
     def resolve_templates(self, payload: Any,
                           context: dict[str, Any]) -> Any:
         """Substitute ``{{clipboard}}`` / ``{{extracts.x}}`` /
         ``{{steps.0.data.text}}`` inside string payloads."""
+        self.last_unresolved = []
+        return self._resolve(payload, context)
+
+    def _resolve(self, payload: Any, context: dict[str, Any]) -> Any:
         if isinstance(payload, str):
             def _one(match: re.Match) -> str:
-                return str(self._lookup(match.group(1), context))
+                found, value = self._lookup_found(match.group(1), context)
+                if not found:
+                    self.last_unresolved.append(match.group(1))
+                    return ""
+                return str(value)
             return _TEMPLATE_RE.sub(_one, payload)
         if isinstance(payload, dict):
-            return {k: self.resolve_templates(v, context)
+            return {k: self._resolve(v, context)
                     for k, v in payload.items()}
         if isinstance(payload, list):
-            return [self.resolve_templates(v, context) for v in payload]
+            return [self._resolve(v, context) for v in payload]
         return payload
+
+    @staticmethod
+    def _lookup_found(path: str,
+                      context: dict[str, Any]) -> tuple[bool, Any]:
+        if path == "clipboard":
+            value = context.get("clipboard", "")
+            return (bool(value), value)
+        parts = path.split(".")
+        node: Any = {"extracts": context.get("extracts", {}),
+                     "steps": context.get("steps", {})}
+        for part in parts:
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            elif isinstance(node, list):
+                try:
+                    node = node[int(part)]
+                except (ValueError, IndexError):
+                    return False, ""
+            else:
+                return False, ""
+        if node is None or node == "":
+            return False, ""
+        return True, node
 
     @staticmethod
     def _lookup(path: str, context: dict[str, Any]) -> Any:
@@ -220,6 +256,10 @@ class WorkflowEngine:
             payload = {k: v for k, v in raw.items()
                        if k not in ("tool", "save_as", "expect", "app")}
             payload = self.resolve_templates(payload, context)
+            unresolved = list(self.last_unresolved)
+            if unresolved:
+                _log.warning("workflow step %s has unresolved %s",
+                             tool, unresolved)
             step = {"tool": tool, **payload}
 
             attempt = 0
@@ -252,6 +292,7 @@ class WorkflowEngine:
                 "evidence": _truncate(checked.get("evidence", {})),
                 "recovery": recovery,
                 "retries": attempt,
+                "unresolved_templates": unresolved,
             })
             context["steps"][str(index)] = _truncate(result.data or {})
             if not result.success or not checked.get("verified"):

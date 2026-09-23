@@ -20,7 +20,7 @@ import sqlite3
 import threading
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Any
 
@@ -75,7 +75,18 @@ def parse_schedule_request(text: str) -> dict[str, Any] | None:
     low = raw.lower()
 
     if "cancel" in low and any(w in low for w in _CANCEL_WORDS):
-        return {"kind": "cancel", "raw": raw}
+        # Targeted cancel keeps the what: "cancel my 10 minute reminder"
+        # cancels only matching reminders; bare "cancel my reminders"
+        # still cancels everything (and says so honestly).
+        target = re.sub(r"\bcancel\b", " ", low)
+        target = re.sub(
+            r"\b(my|the|all|every|any)\b", " ", target)
+        target = re.sub(
+            r"\b(reminders?|tasks?|schedules?|scheduled|alarms?)\b",
+            " ", target)
+        target = re.sub(r"\s+", " ", target).strip(" .!?")
+        return {"kind": "cancel", "raw": raw,
+                "target": target or ""}
 
     # Recurring: "every [N] <unit>"
     m = re.search(
@@ -95,9 +106,13 @@ def parse_schedule_request(text: str) -> dict[str, Any] | None:
             }
 
     # One-time: "in N <unit>"
-    m = re.search(r"in\s+(\d+)\s*(second|sec|minute|min|hour|hr)s?\b", low)
+    m = re.search(
+        r"in\s+(\d+)\s*(second|sec|minute|min|hour|hr|day|week)s?\b", low)
     if m and "remind" in low:
-        unit_seconds = _unit_seconds(m.group(2))
+        unit = m.group(2)
+        unit_seconds = _unit_seconds(unit)
+        if unit == "week":
+            unit_seconds = 7 * 86400
         action = _extract_action(raw)
         if unit_seconds and action:
             return {
@@ -171,27 +186,45 @@ class TaskScheduler:
     ) -> str:
         """Schedule a new task (one-time or recurring).
 
-        Duplicate prevention: an identical pending task (same name + payload)
-        returns the existing id instead of scheduling a second copy, so a
-        repeated request never executes twice.
+        Duplicate prevention: an identical pending task (same name +
+        payload + timing) returns the existing id instead of scheduling
+        a second copy, so a repeated request never executes twice. A
+        repeat with a DIFFERENT delay or interval is a different request
+        and schedules separately (previously the new timing was silently
+        dropped while the user was told the new time).
         """
+        for label, value in (("delay_seconds", delay_seconds),
+                             ("interval_seconds", interval_seconds)):
+            if not isinstance(value, (int, float)) \
+                    or isinstance(value, bool) \
+                    or value != value or value < 0:
+                raise ValueError(f"invalid {label}: {value!r}")
         task_id = uuid.uuid4().hex
         now_ts = time.time() + delay_seconds
         run_at = datetime.fromtimestamp(now_ts, timezone.utc).isoformat()
         created_at = _iso_now()
-        payload_json = json.dumps(payload)
+        payload_json = json.dumps(payload, sort_keys=True)
 
         with self.lock:
             if prevent_duplicates:
                 existing = self.conn.execute(
                     "SELECT id FROM scheduled_tasks "
-                    "WHERE status = 'scheduled' AND task_name = ? AND payload_json = ? "
+                    "WHERE status = 'scheduled' AND task_name = ? "
+                    "AND payload_json = ? AND interval_seconds = ? "
                     "ORDER BY created_at DESC LIMIT 1",
-                    (task_name, payload_json),
+                    (task_name, payload_json, float(interval_seconds)),
                 ).fetchone()
                 if existing:
-                    _log.info("Duplicate scheduled task %s reused %s", task_name, existing[0])
-                    return existing[0]
+                    twin = self.conn.execute(
+                        "SELECT run_at FROM scheduled_tasks WHERE id = ?",
+                        (existing[0],),
+                    ).fetchone()
+                    if twin and abs(
+                            datetime.fromisoformat(twin[0]).timestamp()
+                            - now_ts) <= 60:
+                        _log.info("Duplicate scheduled task %s reused %s",
+                                  task_name, existing[0])
+                        return existing[0]
             self.conn.execute(
                 """
                 INSERT INTO scheduled_tasks (id, task_name, payload_json, run_at, interval_seconds, status, created_at)
@@ -237,10 +270,39 @@ class TaskScheduler:
                 for r in rows
             ]
 
+    def prune_history(self, max_age_days: float = 30.0) -> int:
+        """Delete finished rows older than ``max_age_days``.
+
+        The task table otherwise grows unboundedly: every fired or
+        cancelled reminder leaves a row forever. Only terminal states
+        (completed/cancelled/failed) are pruned, never scheduled work.
+        Returns the number of rows removed.
+        """
+        try:
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(days=max(1.0, float(max_age_days))))
+        except (TypeError, ValueError):
+            return 0
+        with self.lock:
+            cur = self.conn.execute(
+                "DELETE FROM scheduled_tasks "
+                "WHERE status IN ('completed', 'cancelled', 'failed') "
+                "AND created_at < ?",
+                (cutoff.isoformat(),),
+            )
+            self.conn.commit()
+            return cur.rowcount or 0
+
     def start(self) -> None:
         """Start background scheduler loop."""
         if self._running:
             return
+        try:
+            pruned = self.prune_history()
+            if pruned:
+                _log.info("Pruned %d old scheduler rows on startup", pruned)
+        except Exception:
+            _log.debug("scheduler prune on startup failed", exc_info=True)
         self._running = True
         thread = threading.Thread(target=self._scheduler_loop, name="jarvis-scheduler", daemon=True)
         self._worker_thread = thread

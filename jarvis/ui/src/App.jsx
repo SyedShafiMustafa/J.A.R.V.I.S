@@ -145,8 +145,41 @@ export default function App() {
     }
 
     if (type === 'confirmation_required') {
-      setPendingAction({ action_id: data.action_id, tool: data.tool });
-      pushActivity('CONFIRMATION REQUIRED', data.tool || 'action');
+      // Gated tool actions carry action_id and get Approve/Reject
+      // buttons. Organize previews arrive WITHOUT action_id (they are
+      // answered yes/no by voice or text) — those render as an info
+      // banner instead of dead buttons that 400 on confirm.
+      if (data.action_id) {
+        setPendingAction({ action_id: data.action_id, tool: data.tool });
+        pushActivity('CONFIRMATION REQUIRED', data.tool || 'action');
+      } else {
+        setPendingAction({ action_id: null, tool: data.tool, question: data.question || '' });
+        pushActivity('CONFIRMATION REQUIRED', data.question || data.tool || 'action');
+      }
+      return;
+    }
+
+    // Scheduler + organizer lifecycle: previously dropped silently.
+    if (type === 'scheduled') {
+      const label = data.kind === 'cancel'
+        ? `REMINDERS CANCELLED (${data.cancelled ?? 0})`
+        : `REMINDER SET (${data.action || data.kind || 'reminder'})`;
+      pushActivity(label, '');
+      return;
+    }
+
+    if (type === 'organize_preview') {
+      pushActivity('ORGANIZE PREVIEW', `${data.moves ?? 0} moves in ${data.directory || ''}`);
+      return;
+    }
+
+    if (type === 'organize_done') {
+      pushActivity('ORGANIZE DONE', data.message || '');
+      return;
+    }
+
+    if (type === 'organize_cancelled') {
+      pushActivity('ORGANIZE CANCELLED', '');
       return;
     }
 
@@ -184,6 +217,10 @@ export default function App() {
     if (type === 'error') {
       setErrorMessage(data.message || 'Unknown error');
       setStatus('error');
+      // Stale question banners must not survive a failure: answering
+      // them afterwards acts on dead state.
+      setPendingAction(null);
+      setClarification(null);
       pushActivity('CONNECTION ERROR', data.message || 'Unknown error');
       return;
     }
@@ -479,11 +516,16 @@ export default function App() {
                 </div>
               </div>
             )}
-            {pendingAction && (
+            {pendingAction && pendingAction.action_id && (
               <div className="confirm-banner">
                 <span>CONFIRM ACTION // {String(pendingAction.tool || '').toUpperCase()}</span>
                 <button className="confirm-approve" onClick={() => handleConfirm(true)}>CONFIRM</button>
                 <button className="confirm-reject" onClick={() => handleConfirm(false)}>CANCEL</button>
+              </div>
+            )}
+            {pendingAction && !pendingAction.action_id && (
+              <div className="confirm-banner">
+                <span>{pendingAction.question || 'Reply yes or no to continue.'}</span>
               </div>
             )}
             {errorMessage && <div className="error-banner"><span>{errorMessage}</span><button className="error-dismiss" onClick={() => setErrorMessage('')}>DISMISS</button></div>}

@@ -12,7 +12,7 @@ class FakeDesktop:
 
 
 class FakeComputer:
-    def wait_for_window(self, title): return True
+    def wait_for_window(self, title, timeout=10): return True
     def focus_window(self, title): return True
     def type_text(self, text): pass
     def press(self, key): pass

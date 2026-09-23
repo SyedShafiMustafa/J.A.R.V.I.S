@@ -47,10 +47,23 @@ class TerminalTool:
             stderr = (res.stderr or "").strip()
             success = res.returncode == 0
 
+            # The spoken message carries the actual output (first lines),
+            # not just the exit code — "Run echo hi" should answer "hi".
+            if success and stdout:
+                first_lines = "\n".join(stdout.splitlines()[:5])[:300]
+                message = f"Done — output:\n{first_lines}"
+            elif success:
+                message = "Done — no output."
+            elif stderr:
+                message = (f"Command failed (code {res.returncode}): "
+                           f"{stderr.splitlines()[0][:200]}")
+            else:
+                message = f"Command exited with code {res.returncode}"
+
             return ToolResult(
                 "execute_terminal",
                 success,
-                f"Command exited with code {res.returncode}",
+                message,
                 {
                     "returncode": res.returncode,
                     "stdout": stdout[:4000],
