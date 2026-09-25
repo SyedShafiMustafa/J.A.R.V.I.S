@@ -119,6 +119,13 @@ PHASE_SETTINGS_READ = "SETTINGS_READ"
 PHASE_SETTINGS_CHANGE = "SETTINGS_CHANGE"
 PHASE_SETTINGS_VERIFY = "VERIFYING"
 PHASE_SETTINGS_FALLBACK = "FALLBACK"
+# §30 — winget package management (additive). One phase per operation
+# family; VERIFYING/COMPLETE/FAILED reuse the existing vocabulary.
+PHASE_PACKAGE_SEARCH = "PACKAGE_SEARCH"
+PHASE_PACKAGE_INSPECT = "PACKAGE_INSPECT"
+PHASE_PACKAGE_INSTALL = "PACKAGE_INSTALL"
+PHASE_PACKAGE_UPDATE = "PACKAGE_UPDATE"
+PHASE_PACKAGE_UNINSTALL = "PACKAGE_UNINSTALL"
 
 VALID_STATUSES = {
     STATUS_IDLE,
@@ -153,6 +160,11 @@ VALID_PHASES = {
     PHASE_SETTINGS_CHANGE,
     PHASE_SETTINGS_VERIFY,
     PHASE_SETTINGS_FALLBACK,
+    PHASE_PACKAGE_SEARCH,
+    PHASE_PACKAGE_INSPECT,
+    PHASE_PACKAGE_INSTALL,
+    PHASE_PACKAGE_UPDATE,
+    PHASE_PACKAGE_UNINSTALL,
 }
 
 # Visual tool -> HUD phase shown while that tool runs. Read-only visual
@@ -175,6 +187,12 @@ _VISUAL_TOOL_PHASES = {
     "run_workflow": PHASE_TRANSFERRING,
     "get_setting": PHASE_SETTINGS_READ,
     "set_setting": PHASE_SETTINGS_CHANGE,
+    "package_search": PHASE_PACKAGE_SEARCH,
+    "package_inspect": PHASE_PACKAGE_INSPECT,
+    "package_install": PHASE_PACKAGE_INSTALL,
+    "package_upgrade": PHASE_PACKAGE_UPDATE,
+    "package_upgrade_all": PHASE_PACKAGE_UPDATE,
+    "package_uninstall": PHASE_PACKAGE_UNINSTALL,
 }
 
 # Visual tool -> HUD stage label (mirrors tools/visual.py STAGE_LABELS
@@ -196,6 +214,12 @@ _VISUAL_STAGE_LABELS = {
     "run_workflow": "TRANSFERRING",
     "get_setting": "SETTINGS READ",
     "set_setting": "SETTINGS CHANGE",
+    "package_search": "PACKAGE SEARCH",
+    "package_inspect": "PACKAGE INSPECT",
+    "package_install": "PACKAGE INSTALL",
+    "package_upgrade": "PACKAGE UPDATE",
+    "package_upgrade_all": "PACKAGE UPDATE",
+    "package_uninstall": "PACKAGE UNINSTALL",
 }
 
 WAKE_RESPONSES = [

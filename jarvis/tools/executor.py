@@ -5,6 +5,7 @@ from tools.visual import VisualAgent
 from tools.windows import WindowManager
 from tools.workflows import WorkflowEngine
 from tools.settings import SettingsController
+from tools.packages import PackageController
 from tools.whatsapp import WhatsAppManager
 from tools.filesystem import FilesystemTools
 from tools.organizer import FileOrganizer
@@ -33,6 +34,7 @@ class TaskExecutor:
         self.settings = SettingsController(computer=self.computer,
                                            visual=self.visual,
                                            desktop=self.desktop)
+        self.packages = PackageController()
         self.fs = FilesystemTools()
         self.organizer = FileOrganizer()
         self.terminal = TerminalTool()
@@ -560,6 +562,70 @@ class TaskExecutor:
                     {"started": True, "completed": res.success,
                      "verified": res.verified, **data})
 
+            # ---------------- Windows packages (§30) ----------------
+            # winget search/inspect/install/upgrade/uninstall through the
+            # shared PackageController (resolve → act → verify, honest
+            # failure). Results carry operation + verification evidence.
+
+            elif tool == "package_search":
+                res = self.packages.search(step["package"])
+                data = res.to_dict()
+                return ToolResult(
+                    tool, res.success, res.message or "package search",
+                    {"started": True, "completed": res.success,
+                     "verified": res.verified, **data})
+
+            elif tool == "package_inspect":
+                res = self.packages.inspect(step.get("package"),
+                                            step.get("package_id"))
+                data = res.to_dict()
+                return ToolResult(
+                    tool, res.success, res.message or "package inspect",
+                    {"started": True, "completed": res.success,
+                     "verified": res.verified, **data})
+
+            elif tool == "package_install":
+                res = self.packages.install(
+                    step.get("package", ""), step.get("package_id"),
+                    step.get("version"), step.get("timeout", 600.0))
+                data = res.to_dict()
+                return ToolResult(
+                    tool, res.success, res.message or "package install",
+                    {"started": True, "completed": res.success,
+                     "verified": res.verified, **data})
+
+            elif tool == "package_upgrade":
+                res = self.packages.upgrade(
+                    step.get("package", ""), step.get("package_id"),
+                    step.get("timeout", 600.0))
+                data = res.to_dict()
+                return ToolResult(
+                    tool, res.success, res.message or "package upgrade",
+                    {"started": True, "completed": res.success,
+                     "verified": res.verified, **data})
+
+            elif tool == "package_uninstall":
+                res = self.packages.uninstall(
+                    step.get("package", ""), step.get("package_id"),
+                    step.get("timeout", 600.0))
+                data = res.to_dict()
+                return ToolResult(
+                    tool, res.success, res.message or "package uninstall",
+                    {"started": True, "completed": res.success,
+                     "verified": res.verified, **data})
+
+            elif tool == "package_upgrade_all":
+                res = self.packages.upgrade_all(
+                    max_packages=step.get("max_packages", 20),
+                    skip=step.get("skip"),
+                    dry_run=step.get("dry_run", False),
+                    timeout=step.get("timeout", 600.0))
+                data = res.to_dict()
+                return ToolResult(
+                    tool, res.success, res.message or "bulk upgrade",
+                    {"started": True, "completed": res.success,
+                     "verified": res.verified, **data})
+
             # ---------------- Semantic Vision ----------------
 
             elif tool == "click_text":
@@ -849,6 +915,50 @@ class TaskExecutor:
             amount = step.get("amount")
             if isinstance(amount, bool) or not isinstance(amount, int):
                 return ToolResult(tool, False, "invalid amount", {"started": False, "completed": False})
+            return None
+        if tool in ("package_search", "package_install", "package_upgrade",
+                    "package_uninstall"):
+            package = step.get("package")
+            package_id = step.get("package_id")
+            if package_id is not None and (
+                    not isinstance(package_id, str) or not package_id.strip()):
+                return ToolResult(tool, False, "invalid package_id", {"started": False, "completed": False})
+            if package is not None and (
+                    not isinstance(package, str) or not package.strip()):
+                return ToolResult(tool, False, "invalid package", {"started": False, "completed": False})
+            if not (package or "").strip() and not (package_id or "").strip():
+                return ToolResult(tool, False, "invalid package", {"started": False, "completed": False})
+            if tool == "package_install" and step.get("version") is not None:
+                version = step.get("version")
+                if not isinstance(version, str) or not version.strip():
+                    return ToolResult(tool, False, "invalid version", {"started": False, "completed": False})
+            timeout = step.get("timeout", 600.0)
+            if timeout is not None and (
+                    isinstance(timeout, bool) or not isinstance(timeout, (int, float))):
+                return ToolResult(tool, False, "invalid timeout", {"started": False, "completed": False})
+            return None
+        if tool == "package_inspect":
+            for key in ("package", "package_id"):
+                value = step.get(key)
+                if value is not None and (
+                        not isinstance(value, str) or not value.strip()):
+                    return ToolResult(tool, False, f"invalid {key}", {"started": False, "completed": False})
+            return None
+        if tool == "package_upgrade_all":
+            limit = step.get("max_packages", 20)
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not 1 <= int(limit) <= 20:
+                return ToolResult(tool, False, "invalid max_packages", {"started": False, "completed": False})
+            skip = step.get("skip")
+            if skip is not None and (
+                    not isinstance(skip, list) or not all(isinstance(item, str) and item.strip() for item in skip)):
+                return ToolResult(tool, False, "invalid skip", {"started": False, "completed": False})
+            dry_run = step.get("dry_run", False)
+            if not isinstance(dry_run, bool):
+                return ToolResult(tool, False, "invalid dry_run", {"started": False, "completed": False})
+            timeout = step.get("timeout", 600.0)
+            if timeout is not None and (
+                    isinstance(timeout, bool) or not isinstance(timeout, (int, float))):
+                return ToolResult(tool, False, "invalid timeout", {"started": False, "completed": False})
             return None
         if tool == "get_setting":
             setting = step.get("setting")

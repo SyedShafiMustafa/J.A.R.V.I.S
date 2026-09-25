@@ -83,6 +83,15 @@ _TOOL_PERMISSIONS: dict[str, PermissionLevel] = {
     # no new tier is introduced.
     "get_setting": PermissionLevel.HARMLESS,
     "set_setting": PermissionLevel.NORMAL,
+    # Windows packages (§30). Search/inspection are read-only;
+    # install/upgrade mutate the machine (sensitive); uninstall
+    # removes software (destructive — always confirms).
+    "package_search": PermissionLevel.HARMLESS,
+    "package_inspect": PermissionLevel.HARMLESS,
+    "package_install": PermissionLevel.SENSITIVE,
+    "package_upgrade": PermissionLevel.SENSITIVE,
+    "package_upgrade_all": PermissionLevel.SENSITIVE,
+    "package_uninstall": PermissionLevel.DESTRUCTIVE,
     "delete_file": PermissionLevel.DESTRUCTIVE,
     "execute_terminal": PermissionLevel.SENSITIVE,
     "system_shutdown": PermissionLevel.DESTRUCTIVE,

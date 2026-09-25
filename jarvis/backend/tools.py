@@ -567,5 +567,63 @@ def build_default_tool_registry() -> ToolRegistry:
         ],
         idempotent=False,
     ))
+    registry.register(ToolDefinition(
+        name="package_search",
+        description="Search winget packages by name (read-only)",
+        supports_dry_run=True,
+        input_fields=[{"name": "package", "type": "string", "required": True}],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="package_inspect",
+        description="Inspect installed package state/version, or list all installed when empty",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "package", "type": "string", "required": False},
+            {"name": "package_id", "type": "string", "required": False},
+        ],
+        idempotent=True,
+    ))
+    registry.register(ToolDefinition(
+        name="package_install",
+        description="Install a winget package by name, verified present after",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "package", "type": "string", "required": True},
+            {"name": "package_id", "type": "string", "required": False},
+            {"name": "version", "type": "string", "required": False},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="package_upgrade",
+        description="Upgrade one installed winget package, verified version after",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "package", "type": "string", "required": True},
+            {"name": "package_id", "type": "string", "required": False},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="package_uninstall",
+        description="Uninstall a winget package, verified absent after",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "package", "type": "string", "required": True},
+            {"name": "package_id", "type": "string", "required": False},
+        ],
+        idempotent=False,
+    ))
+    registry.register(ToolDefinition(
+        name="package_upgrade_all",
+        description="Bounded bulk upgrade of upgradable winget packages with per-package summary",
+        supports_dry_run=True,
+        input_fields=[
+            {"name": "max_packages", "type": "number", "required": False},
+            {"name": "dry_run", "type": "boolean", "required": False},
+        ],
+        idempotent=False,
+    ))
 
     return registry
